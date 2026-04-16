@@ -3,7 +3,6 @@ import { StorageAdapter } from '../base.js';
 import { Registry } from '../registry.js';
 
 function isSqliteConnection(conn: any): boolean {
-  // Check for '.pragma' to distinguish from MySQL
   return conn && typeof conn.prepare === 'function' && typeof conn.pragma === 'function';
 }
 
@@ -25,6 +24,9 @@ export class SqliteAdapter implements StorageAdapter {
     }
   }
 
+  public begin(): void {
+    if (this.client.open && !this.client.inTransaction) this.client.prepare('BEGIN').run();
+  }
   public commit(): void {
     if (this.client.open && this.client.inTransaction) this.client.prepare('COMMIT').run();
   }

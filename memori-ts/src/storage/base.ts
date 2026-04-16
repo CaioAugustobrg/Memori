@@ -1,5 +1,6 @@
 export interface StorageAdapter {
   execute<T = any>(operation: string, binds?: any[]): Promise<T[]> | T[];
+  begin(): Promise<void> | void;
   commit(): Promise<void> | void;
   rollback(): Promise<void> | void;
   getDialect(): string;

@@ -69,7 +69,6 @@ class Conversation {
       `INSERT IGNORE INTO memori_conversation(uuid, session_id) VALUES (?, ?)`,
       [uuid, sessionId]
     );
-    await this.conn.commit();
     const newConv = await this.conn.execute(
       `SELECT id FROM memori_conversation WHERE session_id = ?`,
       [sessionId]
@@ -82,7 +81,6 @@ class Conversation {
       summary,
       id,
     ]);
-    await this.conn.commit();
     return this;
   }
 }
@@ -94,7 +92,6 @@ class Entity {
       randomUUID(),
       externalId,
     ]);
-    await this.conn.commit();
     const res = await this.conn.execute(`SELECT id FROM memori_entity WHERE external_id = ?`, [
       externalId,
     ]);
@@ -145,11 +142,9 @@ class EntityFact {
       `INSERT INTO memori_entity_fact(uuid, entity_id, content, content_embedding, num_times, date_last_time, uniq) VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?) ON DUPLICATE KEY UPDATE num_times = num_times + 1, date_last_time = CURRENT_TIMESTAMP`,
       [randomUUID(), entityId, content, Buffer.alloc(0), uniq]
     );
-    await this.conn.commit();
   }
 
   public async getEmbeddings(entityId: string | number, limit: number = 1000) {
-    // FIX: Interpolate the limit to avoid prepared statement ER_WRONG_ARGUMENTS errors
     const results = await this.conn.execute(
       `SELECT id, content_embedding FROM memori_entity_fact WHERE entity_id = ? ORDER BY date_last_time DESC, num_times DESC, id DESC LIMIT ${Number(limit)}`,
       [entityId]
@@ -245,7 +240,6 @@ class KnowledgeGraph {
         );
       }
     }
-    await this.conn.commit();
     return this;
   }
 }
@@ -257,7 +251,6 @@ class Process {
       randomUUID(),
       externalId,
     ]);
-    await this.conn.commit();
     const res = await this.conn.execute(`SELECT id FROM memori_process WHERE external_id = ?`, [
       externalId,
     ]);
@@ -275,7 +268,6 @@ class ProcessAttribute {
         [randomUUID(), processId, attribute, generateUniq([attribute])]
       );
     }
-    await this.conn.commit();
     return this;
   }
 }
@@ -291,7 +283,6 @@ class Session {
       `INSERT IGNORE INTO memori_session(uuid, entity_id, process_id) VALUES (?, ?, ?)`,
       [uuid, entityId, processId]
     );
-    await this.conn.commit();
     const res = await this.conn.execute(`SELECT id FROM memori_session WHERE uuid = ?`, [uuid]);
     return res.length > 0 ? Number(res[0].id) : null;
   }

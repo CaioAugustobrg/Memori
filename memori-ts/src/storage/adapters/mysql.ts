@@ -1,9 +1,6 @@
 import { StorageAdapter } from '../base.js';
 import { Registry } from '../registry.js';
 
-/**
- * Checks if the connection is a mysql2 Promise Pool or Connection.
- */
 function isMysqlConnection(conn: any): boolean {
   return conn && typeof conn.execute === 'function' && typeof conn.query === 'function';
 }
@@ -24,6 +21,9 @@ export class MysqlAdapter implements StorageAdapter {
     }
   }
 
+  public async begin(): Promise<void> {
+    await this.client.query('BEGIN');
+  }
   public async commit(): Promise<void> {
     await this.client.query('COMMIT');
   }

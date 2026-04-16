@@ -53,7 +53,7 @@ async function runPostgresTest() {
   console.log('\n💬 3. Sending teaching message...');
   await client.chat.completions.create({
     model: 'gpt-4o-mini',
-    messages: [{ role: 'user', content: "My favorite color is blue." }],
+    messages: [{ role: 'user', content: 'My favorite color is blue.' }],
   });
 
   console.log('\n⏳ 4. Waiting for Rust engine...');
@@ -69,7 +69,7 @@ async function runPostgresTest() {
   console.log('\n🧠 5. Testing Recall...');
   const query = 'What is my favorite color?';
   const recalled = await mem.recall(query);
-  
+
   if (recalled.length === 0) {
     console.log('   [Recall] No memories found.');
   } else {
@@ -91,7 +91,7 @@ async function runPostgresTest() {
 
   console.log('\n🧹 6. Cleaning up...');
   await mem.config.storage!.close();
-  console.log("✅ Test Complete!");
+  console.log('✅ Test Complete!');
 }
 
 runPostgresTest().catch(console.error);

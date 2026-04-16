@@ -73,7 +73,6 @@ class Conversation {
       `INSERT INTO memori_conversation(uuid, session_id) VALUES (?, ?) ON CONFLICT DO NOTHING`,
       [randomUUID(), sessionId]
     );
-    this.conn.commit();
     const newConv = this.conn.execute(`SELECT id FROM memori_conversation WHERE session_id = ?`, [
       sessionId,
     ]) as any[];
@@ -83,7 +82,6 @@ class Conversation {
   public update(id: number | string, summary: string): this {
     if (!summary) return this;
     this.conn.execute(`UPDATE memori_conversation SET summary = ? WHERE id = ?`, [summary, id]);
-    this.conn.commit();
     return this;
   }
 }
@@ -95,7 +93,6 @@ class Entity {
       `INSERT INTO memori_entity(uuid, external_id) VALUES (?, ?) ON CONFLICT DO NOTHING`,
       [randomUUID(), externalId]
     );
-    this.conn.commit();
     const res = this.conn.execute(`SELECT id FROM memori_entity WHERE external_id = ?`, [
       externalId,
     ]) as any[];
@@ -118,7 +115,6 @@ class EntityFact {
       const fact = facts[i];
       const embedding = factEmbeddings && i < factEmbeddings.length ? factEmbeddings[i] : [];
 
-      // Prevent saving facts with empty embeddings which crash the Rust engine
       if (embedding.length === 0) continue;
 
       const embeddingFormatted = formatEmbeddingForDb(embedding);
@@ -148,9 +144,6 @@ class EntityFact {
     return this;
   }
 
-  // Stores a fact content with a zero-length embedding placeholder.
-  // The fact will not appear in vector recall but is persisted for auditing/future use.
-  // content_embedding schema is NOT NULL so we store an empty buffer rather than null.
   public createWithoutEmbedding(entityId: number | string, content: string): void {
     const uniq = generateUniq([content]);
     this.conn.execute(
@@ -159,7 +152,6 @@ class EntityFact {
        ON CONFLICT (entity_id, uniq) DO UPDATE SET num_times = memori_entity_fact.num_times + 1, date_last_time = CURRENT_TIMESTAMP`,
       [randomUUID(), entityId, content, Buffer.alloc(0), uniq]
     );
-    this.conn.commit();
   }
 
   public getEmbeddings(entityId: string | number, limit: number = 1000) {
@@ -167,7 +159,6 @@ class EntityFact {
       `SELECT id, content_embedding FROM memori_entity_fact WHERE entity_id = ? ORDER BY date_last_time DESC, num_times DESC, id DESC LIMIT ?`,
       [entityId, limit]
     ) as any[];
-    // Ensure we only return rows with valid, non-empty embeddings
     return results
       .filter((r) => r.content_embedding && r.content_embedding.length > 0)
       .map((r) => ({
@@ -268,7 +259,6 @@ class KnowledgeGraph {
         );
       }
     }
-    this.conn.commit();
     return this;
   }
 }
@@ -280,7 +270,6 @@ class Process {
       `INSERT INTO memori_process(uuid, external_id) VALUES (?, ?) ON CONFLICT DO NOTHING`,
       [randomUUID(), externalId]
     );
-    this.conn.commit();
     const res = this.conn.execute(`SELECT id FROM memori_process WHERE external_id = ?`, [
       externalId,
     ]) as any[];
@@ -300,7 +289,6 @@ class ProcessAttribute {
         [randomUUID(), processId, attribute, uniq]
       );
     }
-    this.conn.commit();
     return this;
   }
 }
@@ -316,7 +304,6 @@ class Session {
       `INSERT INTO memori_session(uuid, entity_id, process_id) VALUES (?, ?, ?) ON CONFLICT DO NOTHING`,
       [uuid, entityId, processId]
     );
-    this.conn.commit();
     const res = this.conn.execute(`SELECT id FROM memori_session WHERE uuid = ?`, [uuid]) as any[];
     return res.length > 0 ? res[0].id : null;
   }

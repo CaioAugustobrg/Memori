@@ -3,7 +3,6 @@ import { StorageAdapter } from '../base.js';
 import { Registry } from '../registry.js';
 
 function isPostgresConnection(conn: any): boolean {
-  // Ensure it's not MySQL by checking that .execute is missing
   return conn && typeof conn.query === 'function' && typeof conn.execute !== 'function';
 }
 
@@ -18,11 +17,14 @@ export class PostgresAdapter implements StorageAdapter {
     return result.rows;
   }
 
+  public async begin(): Promise<void> {
+    await this.client.query('BEGIN');
+  }
   public async commit(): Promise<void> {
-    await this.execute('COMMIT');
+    await this.client.query('COMMIT');
   }
   public async rollback(): Promise<void> {
-    await this.execute('ROLLBACK');
+    await this.client.query('ROLLBACK');
   }
   public getDialect(): string {
     return 'postgresql';

@@ -39,7 +39,6 @@ export class StorageManager implements StorageBridge {
   }
 
   public async close(): Promise<void> {
-    // Small delay to ensure any pending microtasks finish before closing
     await new Promise((resolve) => setTimeout(resolve, 100));
     await this.adapter.close();
   }
@@ -48,12 +47,7 @@ export class StorageManager implements StorageBridge {
     return this.adapter.getDialect();
   }
 
-  // ====================================================================
-  // FIXED: Correct async/await for ID lookups (MySQL/Postgres)
-  // ====================================================================
-
   public async fetchEmbeddings(entityId: string, limit: number): Promise<EmbeddingRow[]> {
-    // Await the ID lookup so eId is a real value, not a Promise object
     const eId = await this.driver.entity.create(entityId);
     const rows = await this.driver.entityFact.getEmbeddings(eId || entityId, limit);
     return rows;
@@ -71,9 +65,13 @@ export class StorageManager implements StorageBridge {
   }
 
   private writeBatchSync(batch: WriteBatch): WriteAck {
+    if (!batch.ops || batch.ops.length === 0) return { written_ops: 0 };
     let written = 0;
-    for (const op of batch.ops) {
-      try {
+
+    try {
+      this.adapter.begin(); // FIX: Safely call begin via the interface
+
+      for (const op of batch.ops) {
         switch (op.op_type) {
           case 'entity_fact.create': {
             const eId = this.driver.entity.create(op.payload.entity_id);
@@ -144,17 +142,28 @@ export class StorageManager implements StorageBridge {
           }
         }
         written++;
-      } catch (e) {
-        console.warn(`[Memori] Sync WriteOp failed:`, e);
       }
+
+      this.adapter.commit();
+    } catch (e) {
+      console.error(`[Memori] Sync WriteBatch failed, rolling back:`, e);
+      try {
+        this.adapter.rollback();
+      } catch (err) {}
+      return { written_ops: 0 };
     }
+
     return { written_ops: written };
   }
 
   private async writeBatchAsync(batch: WriteBatch): Promise<WriteAck> {
+    if (!batch.ops || batch.ops.length === 0) return { written_ops: 0 };
     let written = 0;
-    for (const op of batch.ops) {
-      try {
+
+    try {
+      await this.adapter.begin(); // FIX: Safely call begin via the interface
+
+      for (const op of batch.ops) {
         switch (op.op_type) {
           case 'entity_fact.create': {
             const eId = await this.driver.entity.create(op.payload.entity_id);
@@ -228,10 +237,17 @@ export class StorageManager implements StorageBridge {
           }
         }
         written++;
-      } catch (e) {
-        console.error(`[Memori] Async WriteOp failed:`, e);
       }
+
+      await this.adapter.commit();
+    } catch (e) {
+      console.error(`[Memori] Async WriteBatch failed, rolling back:`, e);
+      try {
+        await this.adapter.rollback();
+      } catch (err) {}
+      return { written_ops: 0 };
     }
+
     return { written_ops: written };
   }
 }

@@ -68,7 +68,6 @@ class Conversation {
       `INSERT INTO memori_conversation(uuid, session_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
       [randomUUID(), sessionId]
     );
-    await this.conn.commit();
     const newConv = await this.conn.execute(
       `SELECT id FROM memori_conversation WHERE session_id = $1`,
       [sessionId]
@@ -81,7 +80,6 @@ class Conversation {
       summary,
       id,
     ]);
-    await this.conn.commit();
     return this;
   }
 }
@@ -93,7 +91,6 @@ class Entity {
       `INSERT INTO memori_entity(uuid, external_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
       [randomUUID(), externalId]
     );
-    await this.conn.commit();
     const res = await this.conn.execute(`SELECT id FROM memori_entity WHERE external_id = $1`, [
       externalId,
     ]);
@@ -144,11 +141,9 @@ class EntityFact {
       `INSERT INTO memori_entity_fact(uuid, entity_id, content, content_embedding, num_times, date_last_time, uniq) VALUES ($1, $2, $3, $4, 1, CURRENT_TIMESTAMP, $5) ON CONFLICT (entity_id, uniq) DO UPDATE SET num_times = memori_entity_fact.num_times + 1, date_last_time = CURRENT_TIMESTAMP`,
       [randomUUID(), entityId, content, Buffer.alloc(0), uniq]
     );
-    await this.conn.commit();
   }
 
   public async getEmbeddings(entityId: string | number, limit: number = 1000) {
-    // FIX: Interpolate the limit to avoid prepared statement ER_WRONG_ARGUMENTS errors
     const results = await this.conn.execute(
       `SELECT id, content_embedding FROM memori_entity_fact WHERE entity_id = $1 ORDER BY date_last_time DESC, num_times DESC, id DESC LIMIT ${Number(limit)}`,
       [entityId]
@@ -254,7 +249,6 @@ class Process {
       `INSERT INTO memori_process(uuid, external_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
       [randomUUID(), externalId]
     );
-    await this.conn.commit();
     const res = await this.conn.execute(`SELECT id FROM memori_process WHERE external_id = $1`, [
       externalId,
     ]);
@@ -287,7 +281,6 @@ class Session {
       `INSERT INTO memori_session(uuid, entity_id, process_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
       [uuid, entityId, processId]
     );
-    await this.conn.commit();
     const res = await this.conn.execute(`SELECT id FROM memori_session WHERE uuid = $1`, [uuid]);
     return res.length > 0 ? Number(res[0].id) : null;
   }
