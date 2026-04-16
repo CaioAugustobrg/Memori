@@ -13,29 +13,58 @@ export class NativeEngine {
       this.inner = new MemoriEngine(
         modelName || null,
         (reqJson: string) => {
-          const req = JSON.parse(reqJson);
-          const result = storageBridge.fetchEmbeddings(req.entity_id, req.limit);
-          // FIXED: Return the Promise so Rust's block_on can wait for it
-          if (result instanceof Promise) {
-            return result.then((res) => JSON.stringify(res || []));
+          try {
+            const req = JSON.parse(reqJson);
+            const result = storageBridge.fetchEmbeddings(req.entity_id, req.limit);
+            if (result instanceof Promise) {
+              return result
+                .then((res) => JSON.stringify(res || []))
+                .catch((err) => {
+                  console.error('[Memori] Bridge Error in fetchEmbeddings:', err);
+                  return '[]';
+                });
+            }
+            return JSON.stringify(result || []);
+          } catch (e) {
+            console.error('[Memori] Bridge Sync Error (fetchEmbeddings):', e);
+            return '[]';
           }
-          return JSON.stringify(result || []);
         },
         (reqJson: string) => {
-          const req = JSON.parse(reqJson);
-          const result = storageBridge.fetchFactsByIds(req.ids);
-          if (result instanceof Promise) {
-            return result.then((res) => JSON.stringify(res || []));
+          try {
+            const req = JSON.parse(reqJson);
+            const result = storageBridge.fetchFactsByIds(req.ids);
+            if (result instanceof Promise) {
+              return result
+                .then((res) => JSON.stringify(res || []))
+                .catch((err) => {
+                  console.error('[Memori] Bridge Error in fetchFactsByIds:', err);
+                  return '[]';
+                });
+            }
+            return JSON.stringify(result || []);
+          } catch (e) {
+            console.error('[Memori] Bridge Sync Error (fetchFactsByIds):', e);
+            return '[]';
           }
-          return JSON.stringify(result || []);
         },
         (reqJson: string) => {
-          const req = JSON.parse(reqJson);
-          const result = storageBridge.writeBatch(req);
-          if (result instanceof Promise) {
-            return result.then((res) => JSON.stringify(res || { written_ops: 0 }));
+          try {
+            const req = JSON.parse(reqJson);
+            const result = storageBridge.writeBatch(req);
+            if (result instanceof Promise) {
+              return result
+                .then((res) => JSON.stringify(res || { written_ops: 0 }))
+                .catch((err) => {
+                  console.error('[Memori] Bridge Error in writeBatch:', err);
+                  return JSON.stringify({ written_ops: 0 });
+                });
+            }
+            return JSON.stringify(result || { written_ops: 0 });
+          } catch (e) {
+            console.error('[Memori] Bridge Sync Error (writeBatch):', e);
+            return JSON.stringify({ written_ops: 0 });
           }
-          return JSON.stringify(result || { written_ops: 0 });
         }
       );
     }

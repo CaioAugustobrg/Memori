@@ -4,8 +4,6 @@ import { mysqlMigrations } from '../migrations/mysql.js';
 import { Registry } from '../registry.js';
 import { CandidateFactRow } from '../../types/storage.js';
 
-// --- Utility Functions ---
-
 function generateUniq(inputs: string[]): string {
   const hash = createHash('sha256');
   for (const input of inputs) {
@@ -19,11 +17,8 @@ function formatEmbeddingForDb(embedding: number[]): Buffer {
   return Buffer.from(float32Array.buffer);
 }
 
-// --- Component Classes ---
-
 class ConversationMessage {
   constructor(private readonly conn: StorageAdapter) {}
-
   public async create(
     conversationId: number | string,
     role: string,
@@ -31,11 +26,7 @@ class ConversationMessage {
     content: string
   ): Promise<void> {
     await this.conn.execute(
-      `
-      INSERT INTO memori_conversation_message(
-          uuid, conversation_id, role, type, content
-      ) VALUES (?, ?, ?, ?, ?)
-      `,
+      `INSERT INTO memori_conversation_message(uuid, conversation_id, role, type, content) VALUES (?, ?, ?, ?, ?)`,
       [randomUUID(), conversationId, role, type, content]
     );
   }
@@ -43,7 +34,6 @@ class ConversationMessage {
 
 class ConversationMessages {
   constructor(private readonly conn: StorageAdapter) {}
-
   public async read(
     conversationId: number | string
   ): Promise<Array<{ role: string; content: string }>> {
@@ -61,50 +51,31 @@ class Conversation {
     public readonly message: ConversationMessage,
     public readonly messages: ConversationMessages
   ) {}
-
-  public async create(
-    sessionId: number | string,
-    timeoutMinutes: number
-  ): Promise<number | string | null> {
+  public async create(sessionId: number | string, timeoutMinutes: number): Promise<number | null> {
     const existing = await this.conn.execute(
-      `
-      SELECT c.id,
-             COALESCE(MAX(m.date_created), c.date_created) as last_activity
-        FROM memori_conversation c
-        LEFT JOIN memori_conversation_message m ON m.conversation_id = c.id
-       WHERE c.session_id = ?
-       GROUP BY c.id, c.date_created
-      `,
+      `SELECT c.id, COALESCE(MAX(m.date_created), c.date_created) as last_activity FROM memori_conversation c LEFT JOIN memori_conversation_message m ON m.conversation_id = c.id WHERE c.session_id = ? GROUP BY c.id, c.date_created`,
       [sessionId]
     );
-
     if (existing.length > 0) {
-      const existingRow = existing[0];
-      // MySQL specific date math
       const result = await this.conn.execute(
         `SELECT TIMESTAMPDIFF(MINUTE, ?, CURRENT_TIMESTAMP) as minutes_since_activity`,
-        [existingRow.last_activity]
+        [existing[0].last_activity]
       );
-
-      if (result.length > 0 && result[0].minutes_since_activity <= timeoutMinutes) {
-        return existingRow.id;
-      }
+      if (result.length > 0 && result[0].minutes_since_activity <= timeoutMinutes)
+        return Number(existing[0].id);
     }
-
     const uuid = randomUUID();
     await this.conn.execute(
       `INSERT IGNORE INTO memori_conversation(uuid, session_id) VALUES (?, ?)`,
       [uuid, sessionId]
     );
     await this.conn.commit();
-
     const newConv = await this.conn.execute(
       `SELECT id FROM memori_conversation WHERE session_id = ?`,
       [sessionId]
     );
-    return newConv.length > 0 ? newConv[0].id : null;
+    return newConv.length > 0 ? Number(newConv[0].id) : null;
   }
-
   public async update(id: number | string, summary: string): Promise<this> {
     if (!summary) return this;
     await this.conn.execute(`UPDATE memori_conversation SET summary = ? WHERE id = ?`, [
@@ -118,18 +89,16 @@ class Conversation {
 
 class Entity {
   constructor(private readonly conn: StorageAdapter) {}
-
-  public async create(externalId: string): Promise<number | string | null> {
+  public async create(externalId: string): Promise<number | null> {
     await this.conn.execute(`INSERT IGNORE INTO memori_entity(uuid, external_id) VALUES (?, ?)`, [
       randomUUID(),
       externalId,
     ]);
     await this.conn.commit();
-
     const res = await this.conn.execute(`SELECT id FROM memori_entity WHERE external_id = ?`, [
       externalId,
     ]);
-    return res.length > 0 ? res[0].id : null;
+    return res.length > 0 ? Number(res[0].id) : null;
   }
 }
 
@@ -143,40 +112,26 @@ class EntityFact {
     conversationId?: number | string | null
   ): Promise<this> {
     if (!facts || facts.length === 0) return this;
-
     for (let i = 0; i < facts.length; i++) {
       const fact = facts[i];
       const embedding = factEmbeddings && i < factEmbeddings.length ? factEmbeddings[i] : [];
+      if (embedding.length === 0) continue;
       const embeddingFormatted = formatEmbeddingForDb(embedding);
       const uniq = generateUniq([fact]);
 
       await this.conn.execute(
-        `
-        INSERT INTO memori_entity_fact(
-            uuid, entity_id, content, content_embedding, num_times, date_last_time, uniq
-        ) VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?)
-        ON DUPLICATE KEY UPDATE 
-            num_times = num_times + 1,
-            date_last_time = CURRENT_TIMESTAMP
-        `,
+        `INSERT INTO memori_entity_fact(uuid, entity_id, content, content_embedding, num_times, date_last_time, uniq) VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?) ON DUPLICATE KEY UPDATE num_times = num_times + 1, date_last_time = CURRENT_TIMESTAMP`,
         [randomUUID(), entityId, fact, embeddingFormatted, uniq]
       );
-
       if (conversationId) {
         const factRow = await this.conn.execute(
           `SELECT id FROM memori_entity_fact WHERE entity_id = ? AND uniq = ?`,
           [entityId, uniq]
         );
-        const factId = factRow.length > 0 ? factRow[0].id : null;
-
-        if (factId) {
+        if (factRow.length > 0) {
           await this.conn.execute(
-            `
-            INSERT IGNORE INTO memori_entity_fact_mention(
-                uuid, entity_id, fact_id, conversation_id
-            ) VALUES (?, ?, ?, ?)
-            `,
-            [randomUUID(), entityId, factId, conversationId]
+            `INSERT IGNORE INTO memori_entity_fact_mention(uuid, entity_id, fact_id, conversation_id) VALUES (?, ?, ?, ?)`,
+            [randomUUID(), entityId, factRow[0].id, conversationId]
           );
         }
       }
@@ -184,62 +139,59 @@ class EntityFact {
     return this;
   }
 
-  public async getEmbeddings(entityId: string | number, limit: number = 1000) {
-    const results = await this.conn.execute(
-      `
-      SELECT id, content_embedding
-        FROM memori_entity_fact
-       WHERE entity_id = ?
-       ORDER BY date_last_time DESC, num_times DESC, id DESC
-       LIMIT ?
-      `,
-      [entityId, limit]
+  public async createWithoutEmbedding(entityId: number | string, content: string): Promise<void> {
+    const uniq = generateUniq([content]);
+    await this.conn.execute(
+      `INSERT INTO memori_entity_fact(uuid, entity_id, content, content_embedding, num_times, date_last_time, uniq) VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP, ?) ON DUPLICATE KEY UPDATE num_times = num_times + 1, date_last_time = CURRENT_TIMESTAMP`,
+      [randomUUID(), entityId, content, Buffer.alloc(0), uniq]
     );
+    await this.conn.commit();
+  }
 
-    return results.map((r) => ({
-      id: r.id,
-      content_embedding_b64: Buffer.from(r.content_embedding).toString('base64'),
-    }));
+  public async getEmbeddings(entityId: string | number, limit: number = 1000) {
+    // FIX: Interpolate the limit to avoid prepared statement ER_WRONG_ARGUMENTS errors
+    const results = await this.conn.execute(
+      `SELECT id, content_embedding FROM memori_entity_fact WHERE entity_id = ? ORDER BY date_last_time DESC, num_times DESC, id DESC LIMIT ${Number(limit)}`,
+      [entityId]
+    );
+    return results
+      .filter((r) => r.content_embedding && r.content_embedding.length > 0)
+      .map((r) => ({
+        id: Number(r.id),
+        content_embedding_b64: Buffer.from(r.content_embedding).toString('base64'),
+      }));
   }
 
   public async getFactsByIds(factIds: (string | number)[]): Promise<CandidateFactRow[]> {
     if (!factIds || factIds.length === 0) return [];
-
     const placeholders = factIds.map(() => '?').join(',');
     const factRows = await this.conn.execute(
       `SELECT id, content, date_created FROM memori_entity_fact WHERE id IN (${placeholders})`,
       factIds
     );
-
     if (factRows.length === 0) return [];
 
-    const factsById = new Map<number | string, CandidateFactRow>();
+    const factsById = new Map<number, CandidateFactRow>();
     const facts: CandidateFactRow[] = [];
 
     for (const row of factRows) {
+      const numId = Number(row.id);
       const fact = {
-        id: row.id,
+        id: numId,
         content: row.content,
         date_created: row.date_created ? new Date(row.date_created).toISOString() : '',
         summaries: [],
       };
       facts.push(fact);
-      factsById.set(row.id, fact);
+      factsById.set(numId, fact);
     }
 
     const summaryRows = await this.conn.execute(
-      `
-      SELECT m.fact_id, c.summary AS content, COALESCE(c.date_updated, c.date_created) AS date_created
-        FROM memori_entity_fact_mention m
-        JOIN memori_conversation c ON c.id = m.conversation_id
-       WHERE m.fact_id IN (${placeholders})
-         AND c.summary IS NOT NULL AND c.summary <> ''
-      `,
+      `SELECT m.fact_id, c.summary AS content, COALESCE(c.date_updated, c.date_created) AS date_created FROM memori_entity_fact_mention m JOIN memori_conversation c ON c.id = m.conversation_id WHERE m.fact_id IN (${placeholders}) AND c.summary IS NOT NULL AND c.summary <> ''`,
       factIds
     );
-
     for (const row of summaryRows) {
-      const fact = factsById.get(row.fact_id);
+      const fact = factsById.get(Number(row.fact_id));
       if (fact) {
         fact.summaries!.push({
           content: row.content,
@@ -247,17 +199,14 @@ class EntityFact {
         });
       }
     }
-
     return facts;
   }
 }
 
 class KnowledgeGraph {
   constructor(private readonly conn: StorageAdapter) {}
-
   public async create(entityId: number | string, semanticTriples: any[]): Promise<this> {
     if (!semanticTriples || semanticTriples.length === 0) return this;
-
     for (const triple of semanticTriples) {
       const subjName = triple.subject?.name || triple.subject_name;
       const subjType = triple.subject?.type || triple.subject_type || 'entity';
@@ -265,47 +214,34 @@ class KnowledgeGraph {
       const objName = triple.object?.name || triple.object_name;
       const objType = triple.object?.type || triple.object_type || 'entity';
 
-      const subjectUniq = generateUniq([subjName, subjType]);
       await this.conn.execute(
         `INSERT IGNORE INTO memori_subject(uuid, name, type, uniq) VALUES (?, ?, ?, ?)`,
-        [randomUUID(), subjName, subjType, subjectUniq]
+        [randomUUID(), subjName, subjType, generateUniq([subjName, subjType])]
       );
       const subjRes = await this.conn.execute(`SELECT id FROM memori_subject WHERE uniq = ?`, [
-        subjectUniq,
+        generateUniq([subjName, subjType]),
       ]);
-      const subjectId = subjRes.length > 0 ? subjRes[0].id : null;
 
-      const predicateUniq = generateUniq([pred]);
       await this.conn.execute(
         `INSERT IGNORE INTO memori_predicate(uuid, content, uniq) VALUES (?, ?, ?)`,
-        [randomUUID(), pred, predicateUniq]
+        [randomUUID(), pred, generateUniq([pred])]
       );
       const predRes = await this.conn.execute(`SELECT id FROM memori_predicate WHERE uniq = ?`, [
-        predicateUniq,
+        generateUniq([pred]),
       ]);
-      const predicateId = predRes.length > 0 ? predRes[0].id : null;
 
-      const objectUniq = generateUniq([objName, objType]);
       await this.conn.execute(
         `INSERT IGNORE INTO memori_object(uuid, name, type, uniq) VALUES (?, ?, ?, ?)`,
-        [randomUUID(), objName, objType, objectUniq]
+        [randomUUID(), objName, objType, generateUniq([objName, objType])]
       );
       const objRes = await this.conn.execute(`SELECT id FROM memori_object WHERE uniq = ?`, [
-        objectUniq,
+        generateUniq([objName, objType]),
       ]);
-      const objectId = objRes.length > 0 ? objRes[0].id : null;
 
-      if (entityId && subjectId && predicateId && objectId) {
+      if (entityId && subjRes.length > 0 && predRes.length > 0 && objRes.length > 0) {
         await this.conn.execute(
-          `
-          INSERT INTO memori_knowledge_graph(
-              uuid, entity_id, subject_id, predicate_id, object_id, num_times, date_last_time
-          ) VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
-          ON DUPLICATE KEY UPDATE 
-              num_times = num_times + 1,
-              date_last_time = CURRENT_TIMESTAMP
-          `,
-          [randomUUID(), entityId, subjectId, predicateId, objectId]
+          `INSERT INTO memori_knowledge_graph(uuid, entity_id, subject_id, predicate_id, object_id, num_times, date_last_time) VALUES (?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP) ON DUPLICATE KEY UPDATE num_times = num_times + 1, date_last_time = CURRENT_TIMESTAMP`,
+          [randomUUID(), entityId, subjRes[0].id, predRes[0].id, objRes[0].id]
         );
       }
     }
@@ -316,39 +252,27 @@ class KnowledgeGraph {
 
 class Process {
   constructor(private readonly conn: StorageAdapter) {}
-
-  public async create(externalId: string): Promise<number | string | null> {
+  public async create(externalId: string): Promise<number | null> {
     await this.conn.execute(`INSERT IGNORE INTO memori_process(uuid, external_id) VALUES (?, ?)`, [
       randomUUID(),
       externalId,
     ]);
     await this.conn.commit();
-
     const res = await this.conn.execute(`SELECT id FROM memori_process WHERE external_id = ?`, [
       externalId,
     ]);
-    return res.length > 0 ? res[0].id : null;
+    return res.length > 0 ? Number(res[0].id) : null;
   }
 }
 
 class ProcessAttribute {
   constructor(private readonly conn: StorageAdapter) {}
-
   public async create(processId: number | string, attributes: string[]): Promise<this> {
     if (!attributes || attributes.length === 0) return this;
-
     for (const attribute of attributes) {
-      const uniq = generateUniq([attribute]);
       await this.conn.execute(
-        `
-        INSERT INTO memori_process_attribute(
-            uuid, process_id, content, num_times, date_last_time, uniq
-        ) VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP, ?)
-        ON DUPLICATE KEY UPDATE 
-            num_times = num_times + 1,
-            date_last_time = CURRENT_TIMESTAMP
-        `,
-        [randomUUID(), processId, attribute, uniq]
+        `INSERT INTO memori_process_attribute(uuid, process_id, content, num_times, date_last_time, uniq) VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP, ?) ON DUPLICATE KEY UPDATE num_times = num_times + 1, date_last_time = CURRENT_TIMESTAMP`,
+        [randomUUID(), processId, attribute, generateUniq([attribute])]
       );
     }
     await this.conn.commit();
@@ -358,34 +282,29 @@ class ProcessAttribute {
 
 class Session {
   constructor(private readonly conn: StorageAdapter) {}
-
   public async create(
     uuid: string,
     entityId: number | string,
     processId: number | string
-  ): Promise<number | string | null> {
+  ): Promise<number | null> {
     await this.conn.execute(
       `INSERT IGNORE INTO memori_session(uuid, entity_id, process_id) VALUES (?, ?, ?)`,
       [uuid, entityId, processId]
     );
     await this.conn.commit();
-
     const res = await this.conn.execute(`SELECT id FROM memori_session WHERE uuid = ?`, [uuid]);
-    return res.length > 0 ? res[0].id : null;
+    return res.length > 0 ? Number(res[0].id) : null;
   }
 }
 
 class SchemaVersion {
   constructor(private readonly conn: StorageAdapter) {}
-
   public async create(num: number): Promise<void> {
     await this.conn.execute(`INSERT INTO memori_schema_version(num) VALUES (?)`, [num]);
   }
-
   public async delete(): Promise<void> {
     await this.conn.execute(`DELETE FROM memori_schema_version`);
   }
-
   public async read(): Promise<number | null> {
     try {
       const res = await this.conn.execute<{ num: number | string }>(
@@ -405,12 +324,9 @@ class Schema {
   }
 }
 
-// --- Main Driver Class ---
-
 export class MysqlDriver extends BaseDriver {
   public readonly requiresRollbackOnError = true;
   public readonly migrations = mysqlMigrations;
-
   constructor(conn: StorageAdapter) {
     super(conn);
     this.conversationMessage = new ConversationMessage(conn);
@@ -426,5 +342,4 @@ export class MysqlDriver extends BaseDriver {
   }
 }
 
-// Automatically register this driver syntax for MySQL
 Registry.registerDriver('mysql', MysqlDriver);

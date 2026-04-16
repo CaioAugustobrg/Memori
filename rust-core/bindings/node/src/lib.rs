@@ -10,7 +10,7 @@ use engine_orchestrator::storage::{
     HostStorageError, StorageBridge, WriteAck, WriteBatch,
 };
 use engine_orchestrator::{EngineOrchestrator, OrchestratorError};
-use napi::bindgen_prelude::{block_on, FromNapiValue, Promise};
+use napi::bindgen_prelude::{FromNapiValue, Promise};
 use napi::threadsafe_function::{
     ErrorStrategy, ThreadSafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode,
 };
@@ -32,30 +32,58 @@ impl NodeStorageBridge {
     ) -> std::result::Result<String, HostStorageError> {
         let (tx, rx) = mpsc::sync_channel::<String>(1);
 
+        let tokio_handle = napi::tokio::runtime::Handle::try_current().ok();
+
         let status = callback.call_with_return_value(
             payload_json,
             ThreadsafeFunctionCallMode::Blocking,
             move |js_return: JsUnknown| {
-                // 1. Promise (async PostgreSQL/MySQL): resolve off the JS thread so the main thread
-                //    can run microtasks; napi's Promise<T> is a Future, not JsPromise + .then().
-                if js_return.is_promise()? {
+                // 1. Promise (async PostgreSQL/MySQL)
+                if js_return.is_promise().unwrap_or(false) {
                     let promise = Promise::<String>::from_unknown(js_return)?;
                     let tx_inner = tx.clone();
-                    std::thread::spawn(move || {
-                        let out = match block_on(promise) {
-                            Ok(s) => s,
-                            Err(_) => "[]".to_string(),
-                        };
-                        let _ = tx_inner.send(out);
-                    });
+
+                    if let Some(handle) = tokio_handle {
+                        handle.spawn(async move {
+                            let out = match promise.await {
+                                Ok(s) => s,
+                                Err(_) => "[]".to_string(),
+                            };
+                            let _ = tx_inner.send(out);
+                        });
+                    } else {
+                        std::thread::spawn(move || {
+                            if let Ok(rt) = napi::tokio::runtime::Builder::new_current_thread()
+                                .enable_all()
+                                .build()
+                            {
+                                let out = match rt.block_on(promise) {
+                                    Ok(s) => s,
+                                    Err(_) => "[]".to_string(),
+                                };
+                                let _ = tx_inner.send(out);
+                            } else {
+                                let _ = tx_inner.send("[]".to_string());
+                            }
+                        });
+                    }
+
                     return Ok(());
                 }
 
                 // 2. Direct string (sync SQLite)
+                // FIX: Explictly handle the nested Results without relying on Default
                 let out = match js_return.coerce_to_string() {
-                    Ok(val) => val.into_utf8()?.as_str()?.to_string(),
+                    Ok(val) => {
+                        if let Ok(utf8) = val.into_utf8() {
+                            utf8.as_str().unwrap_or("[]").to_string()
+                        } else {
+                            "[]".to_string()
+                        }
+                    }
                     Err(_) => "[]".to_string(),
                 };
+
                 let _ = tx.send(out);
                 Ok(())
             },
@@ -80,7 +108,10 @@ impl StorageBridge for NodeStorageBridge {
         entity_id: &str,
         limit: usize,
     ) -> std::result::Result<Vec<EmbeddingRow>, HostStorageError> {
-        let request = FetchEmbeddingsRequest { entity_id: entity_id.to_string(), limit };
+        let request = FetchEmbeddingsRequest {
+            entity_id: entity_id.to_string(),
+            limit,
+        };
         let payload = serde_json::to_string(&request)
             .map_err(|e| HostStorageError::new("serialization_error", e.to_string()))?;
         let result = Self::call_json(&self.fetch_embeddings_cb, payload)?;
@@ -123,21 +154,26 @@ impl MemoriEngine {
         fetch_facts_by_ids_cb: JsFunction,
         write_batch_cb: JsFunction,
     ) -> Result<Self> {
-        // Fix: Explicitly type 'ctx' to resolve compiler type inference errors
-        let fetch_embeddings_tsfn = fetch_embeddings_cb
-            .create_threadsafe_function(0, |ctx: ThreadSafeCallContext<String>| {
+        let fetch_embeddings_tsfn = fetch_embeddings_cb.create_threadsafe_function(
+            0,
+            |ctx: ThreadSafeCallContext<String>| {
                 ctx.env.create_string(ctx.value.as_str()).map(|v| vec![v])
-            })?;
+            },
+        )?;
 
-        let fetch_facts_tsfn = fetch_facts_by_ids_cb
-            .create_threadsafe_function(0, |ctx: ThreadSafeCallContext<String>| {
+        let fetch_facts_tsfn = fetch_facts_by_ids_cb.create_threadsafe_function(
+            0,
+            |ctx: ThreadSafeCallContext<String>| {
                 ctx.env.create_string(ctx.value.as_str()).map(|v| vec![v])
-            })?;
+            },
+        )?;
 
-        let write_batch_tsfn = write_batch_cb
-            .create_threadsafe_function(0, |ctx: ThreadSafeCallContext<String>| {
+        let write_batch_tsfn = write_batch_cb.create_threadsafe_function(
+            0,
+            |ctx: ThreadSafeCallContext<String>| {
                 ctx.env.create_string(ctx.value.as_str()).map(|v| vec![v])
-            })?;
+            },
+        )?;
 
         let bridge = NodeStorageBridge {
             fetch_embeddings_cb: fetch_embeddings_tsfn,
@@ -158,7 +194,9 @@ impl MemoriEngine {
             .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
         let orch = self.orchestrator.clone();
         napi::tokio::task::spawn_blocking(move || {
-            let ranked = orch.retrieve(request).map_err(orchestrator_error_to_napi_error)?;
+            let ranked = orch
+                .retrieve(request)
+                .map_err(orchestrator_error_to_napi_error)?;
             serde_json::to_string(&ranked)
                 .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
         })
@@ -171,18 +209,24 @@ impl MemoriEngine {
         let request: RetrievalRequest = serde_json::from_str(&request_json)
             .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
         let orch = self.orchestrator.clone();
-        napi::tokio::task::spawn_blocking(move || orch.recall(request).map_err(orchestrator_error_to_napi_error))
-            .await
-            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
+        napi::tokio::task::spawn_blocking(move || {
+            orch.recall(request)
+                .map_err(orchestrator_error_to_napi_error)
+        })
+        .await
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
     }
 
     #[napi]
     pub async fn wait_for_augmentation(&self, timeout_ms: Option<u32>) -> Result<bool> {
         let timeout = timeout_ms.map(|ms| Duration::from_millis(ms as u64));
         let orch = self.orchestrator.clone();
-        napi::tokio::task::spawn_blocking(move || orch.wait_for_augmentation(timeout).map_err(orchestrator_error_to_napi_error))
-            .await
-            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
+        napi::tokio::task::spawn_blocking(move || {
+            orch.wait_for_augmentation(timeout)
+                .map_err(orchestrator_error_to_napi_error)
+        })
+        .await
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
     }
 
     #[napi]
@@ -199,24 +243,33 @@ impl MemoriEngine {
     pub fn embed_texts(&self, texts_json: String) -> Result<String> {
         let texts: Vec<String> = serde_json::from_str(&texts_json)
             .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
-        if texts.is_empty() { return Ok("[]".to_string()); }
+        if texts.is_empty() {
+            return Ok("[]".to_string());
+        }
         let (flat, shape) = self.orchestrator.embed(texts);
         let num_texts = shape[0];
         let dim = shape[1];
-        if num_texts == 0 || dim == 0 { return Ok("[]".to_string()); }
+        if num_texts == 0 || dim == 0 {
+            return Ok("[]".to_string());
+        }
         let embeddings: Vec<Vec<f32>> = (0..num_texts)
             .map(|i| flat[i * dim..(i + 1) * dim].to_vec())
             .collect();
-        serde_json::to_string(&embeddings).map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+        serde_json::to_string(&embeddings)
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
     }
 
     #[napi]
     pub fn execute(&self, command: String) -> Result<String> {
-        self.orchestrator.execute(&command).map_err(orchestrator_error_to_napi_error)
+        self.orchestrator
+            .execute(&command)
+            .map_err(orchestrator_error_to_napi_error)
     }
 
     #[napi]
-    pub fn hello_world(&self) -> String { self.orchestrator.hello_world() }
+    pub fn hello_world(&self) -> String {
+        self.orchestrator.hello_world()
+    }
 }
 
 fn orchestrator_error_to_napi_error(error: OrchestratorError) -> Error {

@@ -1,21 +1,51 @@
 import 'dotenv/config';
-import mysql from 'mysql2/promise';
+import pg from 'pg';
 import { OpenAI } from 'openai';
 import { Memori } from '../../src/index.js';
 
-async function runMysqlTest() {
-  console.log('🚀 1. Initializing Memori with local MySQL...');
-  const conn = await mysql.createConnection({
+async function runPostgresTest() {
+  console.log('🚀 1. Initializing Memori with local PostgreSQL...');
+
+  // =========================================================================
+  // FIX: Force-create the database so we don't rely on Docker's boot scripts
+  // =========================================================================
+  const setupPool = new pg.Pool({
+    host: 'localhost',
+    user: 'memori',
+    password: 'memori',
+    database: 'memori_test',
+    port: 5432,
+  });
+
+  try {
+    await setupPool.query('CREATE DATABASE memori_test;');
+    console.log('   [Setup] Successfully auto-created "memori_test" database.');
+  } catch (err: any) {
+    if (err.code === '42P04') {
+      // 42P04 is the Postgres code for "database already exists" - this is fine!
+    } else {
+      console.error('\n🚨 CRITICAL DB ERROR 🚨');
+      console.error('If you see "role does not exist" or "password authentication failed",');
+      console.error('your Mac has a background Postgres app hijacking port 5432!');
+      console.error('Error Details:', err.message, '\n');
+    }
+  } finally {
+    await setupPool.end();
+  }
+  // =========================================================================
+
+  // Now connect to the actual database
+  const pool = new pg.Pool({
     host: 'localhost',
     user: 'memori',
     database: 'memori_test',
     password: 'memori',
-    port: 3307,
+    port: 5432,
   });
 
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const mem = new Memori({ conn }).llm.register(client);
-  mem.attribution('mysql-user', 'mysql-test');
+  const mem = new Memori({ conn: pool }).llm.register(client);
+  mem.attribution('pg-user', 'pg-test');
 
   console.log('🧱 2. Building Database Schema...');
   await mem.config.storage!.build();
@@ -23,22 +53,23 @@ async function runMysqlTest() {
   console.log('\n💬 3. Sending teaching message...');
   await client.chat.completions.create({
     model: 'gpt-4o-mini',
-    messages: [{ role: 'user', content: 'I am allergic to peanuts.' }],
+    messages: [{ role: 'user', content: "My favorite color is blue." }],
   });
 
   console.log('\n⏳ 4. Waiting for Rust engine...');
   await mem.engine.waitForAugmentation();
 
   // Verification
-  const [eRows] = await conn.execute('SELECT id, external_id FROM memori_entity');
-  const [fRows] = await conn.execute(
-    'SELECT id, entity_id, content, LENGTH(content_embedding) as emb FROM memori_entity_fact'
+  const eRes = await pool.query('SELECT id, external_id FROM memori_entity');
+  const fRes = await pool.query(
+    'SELECT id, entity_id, content, OCTET_LENGTH(content_embedding) as emb FROM memori_entity_fact'
   );
-  console.log(`\n[DB Check] Entities: ${(eRows as any).length}, Facts: ${(fRows as any).length}`);
+  console.log(`\n[DB Check] Entities: ${eRes.rows.length}, Facts: ${fRes.rows.length}`);
 
   console.log('\n🧠 5. Testing Recall...');
-  const query = "Is there anything I shouldn't eat?";
+  const query = 'What is my favorite color?';
   const recalled = await mem.recall(query);
+  
   if (recalled.length === 0) {
     console.log('   [Recall] No memories found.');
   } else {
@@ -58,9 +89,9 @@ async function runMysqlTest() {
 
   await mem.engine.waitForAugmentation();
 
-  console.log('扫 6. Cleaning up...');
+  console.log('\n🧹 6. Cleaning up...');
   await mem.config.storage!.close();
-  console.log("✅ Test Complete! Check your folder for 'memori-test.db'.");
+  console.log("✅ Test Complete!");
 }
 
-runMysqlTest().catch(console.error);
+runPostgresTest().catch(console.error);
