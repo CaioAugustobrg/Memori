@@ -9,15 +9,6 @@ export declare class MemoriEngine {
   recall(requestJson: string): Promise<string>
   waitForAugmentation(timeoutMs?: number | undefined | null): Promise<boolean>
   submitAugmentation(inputJson: string): string
-  /**
-   * Embed a batch of texts using the engine's loaded fastembed model.
-   *
-   * Input:  JSON-encoded `string[]`
-   * Output: JSON-encoded `number[][]` — one float32 vector per input text.
-   *
-   * This is synchronous and safe to call from the Rust engine's writeBatch callback
-   * thread because it runs entirely on the caller thread without touching the event loop.
-   */
   embedTexts(textsJson: string): string
   execute(command: string): string
   helloWorld(): string

@@ -13,34 +13,29 @@ export class NativeEngine {
       this.inner = new MemoriEngine(
         modelName || null,
         (reqJson: string) => {
-          try {
-            const req = JSON.parse(reqJson);
-            const res = storageBridge.fetchEmbeddings(req.entity_id, req.limit);
-            return JSON.stringify(res || []);
-          } catch (e) {
-            console.warn('[Memori] fetchEmbeddings callback failed:', e);
-            return '[]';
+          const req = JSON.parse(reqJson);
+          const result = storageBridge.fetchEmbeddings(req.entity_id, req.limit);
+          // FIXED: Return the Promise so Rust's block_on can wait for it
+          if (result instanceof Promise) {
+            return result.then((res) => JSON.stringify(res || []));
           }
+          return JSON.stringify(result || []);
         },
         (reqJson: string) => {
-          try {
-            const req = JSON.parse(reqJson);
-            const res = storageBridge.fetchFactsByIds(req.ids);
-            return JSON.stringify(res || []);
-          } catch (e) {
-            console.warn('[Memori] fetchFactsByIds callback failed:', e);
-            return '[]';
+          const req = JSON.parse(reqJson);
+          const result = storageBridge.fetchFactsByIds(req.ids);
+          if (result instanceof Promise) {
+            return result.then((res) => JSON.stringify(res || []));
           }
+          return JSON.stringify(result || []);
         },
         (reqJson: string) => {
-          try {
-            const req = JSON.parse(reqJson);
-            const res = storageBridge.writeBatch(req);
-            return JSON.stringify(res || { written_ops: 0 });
-          } catch (e) {
-            console.warn('[Memori] writeBatch callback failed:', e);
-            return JSON.stringify({ written_ops: 0 });
+          const req = JSON.parse(reqJson);
+          const result = storageBridge.writeBatch(req);
+          if (result instanceof Promise) {
+            return result.then((res) => JSON.stringify(res || { written_ops: 0 }));
           }
+          return JSON.stringify(result || { written_ops: 0 });
         }
       );
     }
@@ -61,10 +56,6 @@ export class NativeEngine {
     return await this.inner.recall(JSON.stringify(request));
   }
 
-  /**
-   * Synchronously embeds a batch of texts using the engine's loaded fastembed model.
-   * Safe to call from the Rust engine's writeBatch callback thread.
-   */
   public embedTexts(texts: string[]): number[][] {
     if (!this.inner || texts.length === 0) return [];
     try {

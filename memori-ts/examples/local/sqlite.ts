@@ -37,13 +37,20 @@ async function runLocalTest() {
 
   // Direct DB check — bypasses the Rust engine entirely so we know what was written.
   const entityRows = db.prepare('SELECT id, external_id FROM memori_entity').all() as any[];
-  const factRows = db.prepare('SELECT id, entity_id, content, length(content_embedding) as emb_bytes FROM memori_entity_fact').all() as any[];
+  const factRows = db
+    .prepare(
+      'SELECT id, entity_id, content, length(content_embedding) as emb_bytes FROM memori_entity_fact'
+    )
+    .all() as any[];
   console.log(`\n[DB Check] Entities stored: ${entityRows.length}`);
   for (const e of entityRows) console.log(`  - [${e.id}] ${e.external_id}`);
   console.log(`[DB Check] Facts stored: ${factRows.length}`);
-  for (const f of factRows) console.log(`  - [entity:${f.entity_id}] "${f.content}" (embedding: ${f.emb_bytes} bytes)`);
+  for (const f of factRows)
+    console.log(`  - [entity:${f.entity_id}] "${f.content}" (embedding: ${f.emb_bytes} bytes)`);
   if (factRows.length === 0) {
-    console.warn('[DB Check] No facts were written — the augmentation write did not persist anything.');
+    console.warn(
+      '[DB Check] No facts were written — the augmentation write did not persist anything.'
+    );
   }
 
   console.log('\n🧠 5. Testing Recall...');

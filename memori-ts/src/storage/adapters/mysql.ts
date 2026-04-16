@@ -9,7 +9,7 @@ function isMysqlConnection(conn: any): boolean {
 }
 
 export class MysqlAdapter implements StorageAdapter {
-  private client: any; // Using any because Pool and Connection have similar interfaces in mysql2/promise
+  private client: any;
 
   constructor(conn: any) {
     this.client = conn;
@@ -17,9 +17,8 @@ export class MysqlAdapter implements StorageAdapter {
 
   public async execute<T = any>(operation: string, binds: any[] = []): Promise<T[]> {
     try {
-      // mysql2 execute returns [rows, fields]
       const [rows] = await this.client.execute(operation, binds);
-      return Array.isArray(rows) ? (rows as T[]) : []; // Returns empty array for INSERT/UPDATE results
+      return Array.isArray(rows) ? (rows as T[]) : [];
     } catch (err) {
       throw err;
     }
@@ -28,11 +27,9 @@ export class MysqlAdapter implements StorageAdapter {
   public async commit(): Promise<void> {
     await this.client.query('COMMIT');
   }
-
   public async rollback(): Promise<void> {
     await this.client.query('ROLLBACK');
   }
-
   public getDialect(): string {
     return 'mysql';
   }
@@ -46,5 +43,4 @@ export class MysqlAdapter implements StorageAdapter {
   }
 }
 
-// Automatically register this adapter
 Registry.registerAdapter(isMysqlConnection, MysqlAdapter);
