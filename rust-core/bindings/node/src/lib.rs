@@ -98,46 +98,11 @@ impl StorageBridge for NodeStorageBridge {
 
 #[napi]
 pub struct MemoriEngine {
-    inner: EngineOrchestrator,
+    orchestrator: Arc<EngineOrchestrator>,
 }
 
 #[napi]
 impl MemoriEngine {
-    #[napi(constructor)]
-    pub fn new(model_name: Option<String>) -> Result<Self> {
-        let inner = EngineOrchestrator::new(model_name.as_deref())
-            .map_err(orchestrator_error_to_napi_error)?;
-        Ok(Self { inner })
-    }
-
-    #[napi]
-    pub fn execute(&self, command: String) -> Result<String> {
-        self.inner
-            .execute(&command)
-            .map_err(orchestrator_error_to_napi_error)
-    }
-
-    #[napi]
-    pub fn hello_world(&self) -> String {
-        self.inner.hello_world()
-    }
-
-    #[napi]
-    pub fn core_postprocess_request(&self, payload: String) -> Result<String> {
-        self.inner
-            .postprocess_request(&payload)
-            .map(|accepted| accepted.job_id.to_string())
-            .map_err(orchestrator_error_to_napi_error)
-    }
-}
-
-#[napi]
-pub struct EngineHandle {
-    orchestrator: EngineOrchestrator,
-}
-
-#[napi]
-impl EngineHandle {
     #[napi(constructor)]
     pub fn new(
         model_name: Option<String>,
@@ -146,21 +111,15 @@ impl EngineHandle {
         write_batch_cb: JsFunction,
     ) -> Result<Self> {
         let fetch_embeddings_tsfn = fetch_embeddings_cb
-            .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(0, |ctx| {
-                Ok(vec![ctx.value])
-            })
+            .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(0, |ctx| Ok(vec![ctx.value]))
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
         let fetch_facts_tsfn = fetch_facts_by_ids_cb
-            .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(0, |ctx| {
-                Ok(vec![ctx.value])
-            })
+            .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(0, |ctx| Ok(vec![ctx.value]))
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
         let write_batch_tsfn = write_batch_cb
-            .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(0, |ctx| {
-                Ok(vec![ctx.value])
-            })
+            .create_threadsafe_function::<String, String, _, ErrorStrategy::Fatal>(0, |ctx| Ok(vec![ctx.value]))
             .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?;
 
         let bridge = NodeStorageBridge {
@@ -169,85 +128,97 @@ impl EngineHandle {
             write_batch_cb: write_batch_tsfn,
         };
 
-        let orchestrator =
+        let orchestrator = Arc::new(
             EngineOrchestrator::new_with_storage(model_name.as_deref(), Some(Arc::new(bridge)))
-                .map_err(orchestrator_error_to_napi_error)?;
+                .map_err(orchestrator_error_to_napi_error)?
+        );
         Ok(Self { orchestrator })
     }
 
     #[napi]
-    pub fn execute(&self, command: String) -> Result<String> {
-        self.orchestrator
-            .execute(&command)
-            .map_err(orchestrator_error_to_napi_error)
-    }
-
-    #[napi]
-    pub fn hello_world(&self) -> Result<String> {
-        Ok(self.orchestrator.hello_world())
-    }
-
-    #[napi]
-    pub fn core_postprocess_request(&self, payload: String) -> Result<String> {
-        self.orchestrator
-            .postprocess_request(&payload)
-            .map(|accepted| accepted.job_id.to_string())
-            .map_err(orchestrator_error_to_napi_error)
-    }
-
-    #[napi]
-    pub fn retrieve(&self, request_json: String) -> Result<String> {
+    pub async fn retrieve(&self, request_json: String) -> Result<String> {
         let request: RetrievalRequest = serde_json::from_str(&request_json)
             .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
-        let ranked = self
-            .orchestrator
-            .retrieve(request)
-            .map_err(orchestrator_error_to_napi_error)?;
-        serde_json::to_string(&ranked)
-            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+        let orch = self.orchestrator.clone();
+        
+        napi::tokio::task::spawn_blocking(move || {
+            let ranked = orch.retrieve(request).map_err(orchestrator_error_to_napi_error)?;
+            serde_json::to_string(&ranked).map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+        })
+        .await
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
     }
 
     #[napi]
-    pub fn recall(&self, request_json: String) -> Result<String> {
+    pub async fn recall(&self, request_json: String) -> Result<String> {
         let request: RetrievalRequest = serde_json::from_str(&request_json)
             .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
-        self.orchestrator
-            .recall(request)
-            .map_err(orchestrator_error_to_napi_error)
+        let orch = self.orchestrator.clone();
+        
+        napi::tokio::task::spawn_blocking(move || {
+            orch.recall(request).map_err(orchestrator_error_to_napi_error)
+        })
+        .await
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
+    }
+
+    #[napi]
+    pub async fn wait_for_augmentation(&self, timeout_ms: Option<u32>) -> Result<bool> {
+        let timeout = timeout_ms.map(|ms| Duration::from_millis(ms as u64));
+        let orch = self.orchestrator.clone();
+        
+        napi::tokio::task::spawn_blocking(move || {
+            orch.wait_for_augmentation(timeout).map_err(orchestrator_error_to_napi_error)
+        })
+        .await
+        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
     }
 
     #[napi]
     pub fn submit_augmentation(&self, input_json: String) -> Result<String> {
         let input: AugmentationInput = serde_json::from_str(&input_json)
             .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
-        self.orchestrator
-            .submit_augmentation(input)
+        self.orchestrator.submit_augmentation(input)
             .map(|accepted| accepted.job_id.to_string())
             .map_err(orchestrator_error_to_napi_error)
     }
-}
 
-#[napi]
-pub fn execute(command: String) -> Result<String> {
-    let orchestrator = EngineOrchestrator::new(None).map_err(orchestrator_error_to_napi_error)?;
-    orchestrator
-        .execute(&command)
-        .map_err(orchestrator_error_to_napi_error)
-}
+    /// Embed a batch of texts using the engine's loaded fastembed model.
+    ///
+    /// Input:  JSON-encoded `string[]`
+    /// Output: JSON-encoded `number[][]` — one float32 vector per input text.
+    ///
+    /// This is synchronous and safe to call from the Rust engine's writeBatch callback
+    /// thread because it runs entirely on the caller thread without touching the event loop.
+    #[napi]
+    pub fn embed_texts(&self, texts_json: String) -> Result<String> {
+        let texts: Vec<String> = serde_json::from_str(&texts_json)
+            .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
+        if texts.is_empty() {
+            return Ok("[]".to_string());
+        }
+        let (flat, shape) = self.orchestrator.embed(texts);
+        let num_texts = shape[0];
+        let dim = shape[1];
+        if num_texts == 0 || dim == 0 {
+            return Ok("[]".to_string());
+        }
+        let embeddings: Vec<Vec<f32>> = (0..num_texts)
+            .map(|i| flat[i * dim..(i + 1) * dim].to_vec())
+            .collect();
+        serde_json::to_string(&embeddings)
+            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+    }
 
-#[napi]
-pub fn hello_world() -> Result<String> {
-    let orchestrator = EngineOrchestrator::new(None).map_err(orchestrator_error_to_napi_error)?;
-    Ok(orchestrator.hello_world())
-}
+    #[napi]
+    pub fn execute(&self, command: String) -> Result<String> {
+        self.orchestrator.execute(&command).map_err(orchestrator_error_to_napi_error)
+    }
 
-#[napi]
-pub fn core_postprocess_request(payload: String) -> Result<String> {
-    let orchestrator = EngineOrchestrator::new(None).map_err(orchestrator_error_to_napi_error)?;
-    orchestrator
-        .postprocess_request(&payload)
-        .map(|accepted| accepted.job_id.to_string())
-        .map_err(orchestrator_error_to_napi_error)
+    #[napi]
+    pub fn hello_world(&self) -> String {
+        self.orchestrator.hello_world()
+    }
 }
 
 fn orchestrator_error_to_napi_error(error: OrchestratorError) -> Error {
