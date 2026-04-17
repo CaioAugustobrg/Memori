@@ -1,5 +1,5 @@
 import { MemoriEngine } from '/Users/rpkruse/src/memori/python-sdk/rust-core/bindings/node/index.js';
-import { StorageBridge } from '../types/storage.js';
+import { StorageBridge, WriteBatch } from '../types/storage.js';
 import { RetrievalRequest, RecallObject } from '../types/api.js';
 import { AugmentationInput } from '../types/integrations.js';
 
@@ -14,54 +14,54 @@ export class NativeEngine {
         modelName || null,
         (reqJson: string) => {
           try {
-            const req = JSON.parse(reqJson);
+            const req = JSON.parse(reqJson) as { entity_id: string; limit: number };
             const result = storageBridge.fetchEmbeddings(req.entity_id, req.limit);
             if (result instanceof Promise) {
               return result
-                .then((res) => JSON.stringify(res || []))
-                .catch((err) => {
+                .then((res) => JSON.stringify(res))
+                .catch((err: unknown) => {
                   console.error('[Memori] Bridge Error in fetchEmbeddings:', err);
                   return '[]';
                 });
             }
-            return JSON.stringify(result || []);
-          } catch (e) {
+            return JSON.stringify(result);
+          } catch (e: unknown) {
             console.error('[Memori] Bridge Sync Error (fetchEmbeddings):', e);
             return '[]';
           }
         },
         (reqJson: string) => {
           try {
-            const req = JSON.parse(reqJson);
+            const req = JSON.parse(reqJson) as { ids: (number | string)[] };
             const result = storageBridge.fetchFactsByIds(req.ids);
             if (result instanceof Promise) {
               return result
-                .then((res) => JSON.stringify(res || []))
-                .catch((err) => {
+                .then((res) => JSON.stringify(res))
+                .catch((err: unknown) => {
                   console.error('[Memori] Bridge Error in fetchFactsByIds:', err);
                   return '[]';
                 });
             }
-            return JSON.stringify(result || []);
-          } catch (e) {
+            return JSON.stringify(result);
+          } catch (e: unknown) {
             console.error('[Memori] Bridge Sync Error (fetchFactsByIds):', e);
             return '[]';
           }
         },
         (reqJson: string) => {
           try {
-            const req = JSON.parse(reqJson);
+            const req = JSON.parse(reqJson) as WriteBatch;
             const result = storageBridge.writeBatch(req);
             if (result instanceof Promise) {
               return result
-                .then((res) => JSON.stringify(res || { written_ops: 0 }))
-                .catch((err) => {
+                .then((res) => JSON.stringify(res))
+                .catch((err: unknown) => {
                   console.error('[Memori] Bridge Error in writeBatch:', err);
                   return JSON.stringify({ written_ops: 0 });
                 });
             }
-            return JSON.stringify(result || { written_ops: 0 });
-          } catch (e) {
+            return JSON.stringify(result);
+          } catch (e: unknown) {
             console.error('[Memori] Bridge Sync Error (writeBatch):', e);
             return JSON.stringify({ written_ops: 0 });
           }
@@ -77,7 +77,7 @@ export class NativeEngine {
   public async retrieve(request: RetrievalRequest): Promise<RecallObject[]> {
     if (!this.inner) throw new Error('Native engine not initialized.');
     const resJson = await this.inner.retrieve(JSON.stringify(request));
-    return JSON.parse(resJson);
+    return JSON.parse(resJson) as RecallObject[];
   }
 
   public async recall(request: RetrievalRequest): Promise<string> {
@@ -88,7 +88,7 @@ export class NativeEngine {
   public embedTexts(texts: string[]): number[][] {
     if (!this.inner || texts.length === 0) return [];
     try {
-      return JSON.parse(this.inner.embedTexts(JSON.stringify(texts)));
+      return JSON.parse(this.inner.embedTexts(JSON.stringify(texts))) as number[][];
     } catch {
       return [];
     }

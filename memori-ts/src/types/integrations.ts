@@ -137,11 +137,11 @@ export interface AugmentationInput {
   storage_cockroachdb?: boolean;
   sdk_version?: string | null;
   use_mock_response?: boolean;
-  mock_response?: any;
+  mock_response?: unknown;
   session_id?: string | null;
   fact_id?: string | null;
   content?: string | null;
-  metadata?: any;
+  metadata?: unknown;
 }
 
 /**

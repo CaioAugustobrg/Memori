@@ -1,24 +1,34 @@
-import { StorageAdapter } from '../base.js';
+import { StorageAdapter, SqlBindValue } from '../base.js';
 import { Registry } from '../registry.js';
 
-function isMysqlConnection(conn: any): boolean {
-  return conn && typeof conn.execute === 'function' && typeof conn.query === 'function';
+interface MysqlLike {
+  execute(sql: string, binds?: SqlBindValue[]): Promise<[unknown[], unknown]>;
+  query(sql: string): Promise<unknown>;
+  end?(): Promise<void>;
+  release?(): void;
+}
+
+function isMysqlConnection(conn: unknown): boolean {
+  return (
+    conn != null &&
+    typeof (conn as MysqlLike).execute === 'function' &&
+    typeof (conn as MysqlLike).query === 'function'
+  );
 }
 
 export class MysqlAdapter implements StorageAdapter {
-  private client: any;
+  private client: MysqlLike;
 
-  constructor(conn: any) {
-    this.client = conn;
+  constructor(conn: unknown) {
+    this.client = conn as MysqlLike;
   }
 
-  public async execute<T = any>(operation: string, binds: any[] = []): Promise<T[]> {
-    try {
-      const [rows] = await this.client.execute(operation, binds);
-      return Array.isArray(rows) ? (rows as T[]) : [];
-    } catch (err) {
-      throw err;
-    }
+  public async execute<T = Record<string, unknown>>(
+    operation: string,
+    binds: SqlBindValue[] = []
+  ): Promise<T[]> {
+    const [rows] = await this.client.execute(operation, binds);
+    return Array.isArray(rows) ? (rows as T[]) : [];
   }
 
   public async begin(): Promise<void> {
@@ -35,9 +45,9 @@ export class MysqlAdapter implements StorageAdapter {
   }
 
   public async close(): Promise<void> {
-    if ('end' in this.client && typeof this.client.end === 'function') {
+    if (typeof this.client.end === 'function') {
       await this.client.end();
-    } else if ('release' in this.client && typeof this.client.release === 'function') {
+    } else if (typeof this.client.release === 'function') {
       this.client.release();
     }
   }

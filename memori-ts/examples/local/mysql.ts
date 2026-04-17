@@ -18,7 +18,8 @@ async function runMysqlTest() {
   mem.attribution('mysql-user', 'mysql-test');
 
   console.log('🧱 2. Building Database Schema...');
-  await mem.config.storage!.build();
+  if (!mem.config.storage) throw new Error('Storage not initialized');
+  await mem.config.storage.build();
 
   console.log('\n💬 3. Sending teaching message...');
   await client.chat.completions.create({
@@ -34,7 +35,9 @@ async function runMysqlTest() {
   const [fRows] = await conn.execute(
     'SELECT id, entity_id, content, LENGTH(content_embedding) as emb FROM memori_entity_fact'
   );
-  console.log(`\n[DB Check] Entities: ${(eRows as any).length}, Facts: ${(fRows as any).length}`);
+  console.log(
+    `\n[DB Check] Entities: ${(eRows as unknown[]).length}, Facts: ${(fRows as unknown[]).length}`
+  );
 
   console.log('\n🧠 5. Testing Recall...');
   const query = "Is there anything I shouldn't eat?";
@@ -59,7 +62,7 @@ async function runMysqlTest() {
   await mem.engine.waitForAugmentation();
 
   console.log('扫 6. Cleaning up...');
-  await mem.config.storage!.close();
+  await mem.config.storage.close();
 
   console.log("✅ Test Complete! Check your folder for 'memori-test.db'.");
 }

@@ -1,27 +1,27 @@
 import type { Database } from 'better-sqlite3';
-import { StorageAdapter } from '../base.js';
+import { StorageAdapter, SqlBindValue } from '../base.js';
 import { Registry } from '../registry.js';
 
-function isSqliteConnection(conn: any): boolean {
-  return conn && typeof conn.prepare === 'function' && typeof conn.pragma === 'function';
+function isSqliteConnection(conn: unknown): boolean {
+  return (
+    conn != null &&
+    typeof (conn as Database).prepare === 'function' &&
+    typeof (conn as Database).pragma === 'function'
+  );
 }
 
 export class SqliteAdapter implements StorageAdapter {
   private client: Database;
-  constructor(conn: any) {
-    this.client = conn;
+  constructor(conn: unknown) {
+    this.client = conn as Database;
     this.client.pragma('journal_mode = WAL');
     this.client.pragma('foreign_keys = ON');
   }
 
-  public execute<T = any>(operation: string, binds: any[] = []): T[] {
+  public execute<T = Record<string, unknown>>(operation: string, binds: SqlBindValue[] = []): T[] {
     if (!this.client.open) return [];
-    try {
-      const stmt = this.client.prepare(operation);
-      return stmt.reader ? (stmt.all(...binds) as T[]) : (stmt.run(...binds), []);
-    } catch (err) {
-      throw err;
-    }
+    const stmt = this.client.prepare(operation);
+    return stmt.reader ? (stmt.all(...binds) as T[]) : (stmt.run(...binds), []);
   }
 
   public begin(): void {

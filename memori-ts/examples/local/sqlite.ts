@@ -18,7 +18,8 @@ async function runLocalTest() {
   mem.attribution('test-user-001', 'local-test-script');
 
   console.log('🧱 2. Building Database Schema...');
-  await mem.config.storage!.build();
+  if (!mem.config.storage) throw new Error('Storage not initialized');
+  await mem.config.storage.build();
 
   console.log('\n💬 3. Sending first message (Teaching Memori)...');
   const response1 = await client.chat.completions.create({
@@ -36,12 +37,15 @@ async function runLocalTest() {
   await mem.engine.waitForAugmentation();
 
   // Direct DB check — bypasses the Rust engine entirely so we know what was written.
-  const entityRows = db.prepare('SELECT id, external_id FROM memori_entity').all() as any[];
+  const entityRows = db.prepare('SELECT id, external_id FROM memori_entity').all() as Array<{
+    id: number;
+    external_id: string;
+  }>;
   const factRows = db
     .prepare(
       'SELECT id, entity_id, content, length(content_embedding) as emb_bytes FROM memori_entity_fact'
     )
-    .all() as any[];
+    .all() as Array<{ id: number; entity_id: number; content: string; emb_bytes: number }>;
   console.log(`\n[DB Check] Entities stored: ${entityRows.length}`);
   for (const e of entityRows) console.log(`  - [${e.id}] ${e.external_id}`);
   console.log(`[DB Check] Facts stored: ${factRows.length}`);
@@ -78,10 +82,10 @@ async function runLocalTest() {
   await mem.engine.waitForAugmentation();
 
   console.log('扫 6. Cleaning up...');
-  await mem.config.storage!.close();
+  await mem.config.storage.close();
   console.log("✅ Test Complete! Check your folder for 'memori-test.db'.");
 }
 
-runLocalTest().catch((err) => {
+runLocalTest().catch((err: unknown) => {
   console.error('Test failed:', err);
 });

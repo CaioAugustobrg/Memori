@@ -57,7 +57,7 @@ export type WriteOp =
       payload: {
         entity_id: string | number;
         content: string;
-        metadata?: any;
+        metadata?: unknown;
       };
     };
 

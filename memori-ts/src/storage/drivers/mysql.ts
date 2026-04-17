@@ -2,7 +2,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { StorageAdapter, BaseDriver } from '../base.js';
 import { mysqlMigrations } from '../migrations/mysql.js';
 import { Registry } from '../registry.js';
-import { CandidateFactRow } from '../../types/storage.js';
+import { CandidateFactRow, SemanticTriplePayload } from '../../types/storage.js';
 
 function generateUniq(inputs: string[]): string {
   const hash = createHash('sha256');
@@ -37,7 +37,7 @@ class ConversationMessages {
   public async read(
     conversationId: number | string
   ): Promise<Array<{ role: string; content: string }>> {
-    const results = await this.conn.execute(
+    const results = await this.conn.execute<{ role: string; content: string }>(
       `SELECT role, content FROM memori_conversation_message WHERE conversation_id = ?`,
       [conversationId]
     );
@@ -52,12 +52,12 @@ class Conversation {
     public readonly messages: ConversationMessages
   ) {}
   public async create(sessionId: number | string, timeoutMinutes: number): Promise<number | null> {
-    const existing = await this.conn.execute(
+    const existing = await this.conn.execute<{ id: number | string; last_activity: string }>(
       `SELECT c.id, COALESCE(MAX(m.date_created), c.date_created) as last_activity FROM memori_conversation c LEFT JOIN memori_conversation_message m ON m.conversation_id = c.id WHERE c.session_id = ? GROUP BY c.id, c.date_created`,
       [sessionId]
     );
     if (existing.length > 0) {
-      const result = await this.conn.execute(
+      const result = await this.conn.execute<{ minutes_since_activity: number }>(
         `SELECT TIMESTAMPDIFF(MINUTE, ?, CURRENT_TIMESTAMP) as minutes_since_activity`,
         [existing[0].last_activity]
       );
@@ -69,7 +69,7 @@ class Conversation {
       `INSERT IGNORE INTO memori_conversation(uuid, session_id) VALUES (?, ?)`,
       [uuid, sessionId]
     );
-    const newConv = await this.conn.execute(
+    const newConv = await this.conn.execute<{ id: number | string }>(
       `SELECT id FROM memori_conversation WHERE session_id = ?`,
       [sessionId]
     );
@@ -87,14 +87,15 @@ class Conversation {
 
 class Entity {
   constructor(private readonly conn: StorageAdapter) {}
-  public async create(externalId: string): Promise<number | null> {
+  public async create(externalId: string | number): Promise<number | null> {
     await this.conn.execute(`INSERT IGNORE INTO memori_entity(uuid, external_id) VALUES (?, ?)`, [
       randomUUID(),
       externalId,
     ]);
-    const res = await this.conn.execute(`SELECT id FROM memori_entity WHERE external_id = ?`, [
-      externalId,
-    ]);
+    const res = await this.conn.execute<{ id: number | string }>(
+      `SELECT id FROM memori_entity WHERE external_id = ?`,
+      [externalId]
+    );
     return res.length > 0 ? Number(res[0].id) : null;
   }
 }
@@ -108,7 +109,7 @@ class EntityFact {
     factEmbeddings?: number[][],
     conversationId?: number | string | null
   ): Promise<this> {
-    if (!facts || facts.length === 0) return this;
+    if (facts.length === 0) return this;
     for (let i = 0; i < facts.length; i++) {
       const fact = facts[i];
       const embedding = factEmbeddings && i < factEmbeddings.length ? factEmbeddings[i] : [];
@@ -121,7 +122,7 @@ class EntityFact {
         [randomUUID(), entityId, fact, embeddingFormatted, uniq]
       );
       if (conversationId) {
-        const factRow = await this.conn.execute(
+        const factRow = await this.conn.execute<{ id: number | string }>(
           `SELECT id FROM memori_entity_fact WHERE entity_id = ? AND uniq = ?`,
           [entityId, uniq]
         );
@@ -145,12 +146,18 @@ class EntityFact {
   }
 
   public async getEmbeddings(entityId: string | number, limit: number = 1000) {
-    const results = await this.conn.execute(
-      `SELECT id, content_embedding FROM memori_entity_fact WHERE entity_id = ? ORDER BY date_last_time DESC, num_times DESC, id DESC LIMIT ${Number(limit)}`,
+    const results = await this.conn.execute<{
+      id: number | string;
+      content_embedding: Buffer | null;
+    }>(
+      `SELECT id, content_embedding FROM memori_entity_fact WHERE entity_id = ? ORDER BY date_last_time DESC, num_times DESC, id DESC LIMIT ${limit}`,
       [entityId]
     );
     return results
-      .filter((r) => r.content_embedding && r.content_embedding.length > 0)
+      .filter(
+        (r): r is { id: number | string; content_embedding: Buffer } =>
+          r.content_embedding != null && r.content_embedding.length > 0
+      )
       .map((r) => ({
         id: Number(r.id),
         content_embedding_b64: Buffer.from(r.content_embedding).toString('base64'),
@@ -158,9 +165,13 @@ class EntityFact {
   }
 
   public async getFactsByIds(factIds: (string | number)[]): Promise<CandidateFactRow[]> {
-    if (!factIds || factIds.length === 0) return [];
+    if (factIds.length === 0) return [];
     const placeholders = factIds.map(() => '?').join(',');
-    const factRows = await this.conn.execute(
+    const factRows = await this.conn.execute<{
+      id: number | string;
+      content: string;
+      date_created: string | Date;
+    }>(
       `SELECT id, content, date_created FROM memori_entity_fact WHERE id IN (${placeholders})`,
       factIds
     );
@@ -171,7 +182,7 @@ class EntityFact {
 
     for (const row of factRows) {
       const numId = Number(row.id);
-      const fact = {
+      const fact: CandidateFactRow = {
         id: numId,
         content: row.content,
         date_created: row.date_created ? new Date(row.date_created).toISOString() : '',
@@ -181,14 +192,18 @@ class EntityFact {
       factsById.set(numId, fact);
     }
 
-    const summaryRows = await this.conn.execute(
+    const summaryRows = await this.conn.execute<{
+      fact_id: number | string;
+      content: string;
+      date_created: string | Date;
+    }>(
       `SELECT m.fact_id, c.summary AS content, COALESCE(c.date_updated, c.date_created) AS date_created FROM memori_entity_fact_mention m JOIN memori_conversation c ON c.id = m.conversation_id WHERE m.fact_id IN (${placeholders}) AND c.summary IS NOT NULL AND c.summary <> ''`,
       factIds
     );
     for (const row of summaryRows) {
       const fact = factsById.get(Number(row.fact_id));
       if (fact) {
-        fact.summaries!.push({
+        (fact.summaries ??= []).push({
           content: row.content,
           date_created: row.date_created ? new Date(row.date_created).toISOString() : '',
         });
@@ -200,38 +215,44 @@ class EntityFact {
 
 class KnowledgeGraph {
   constructor(private readonly conn: StorageAdapter) {}
-  public async create(entityId: number | string, semanticTriples: any[]): Promise<this> {
-    if (!semanticTriples || semanticTriples.length === 0) return this;
+  public async create(
+    entityId: number | string,
+    semanticTriples: SemanticTriplePayload[]
+  ): Promise<this> {
+    if (semanticTriples.length === 0) return this;
     for (const triple of semanticTriples) {
-      const subjName = triple.subject?.name || triple.subject_name;
-      const subjType = triple.subject?.type || triple.subject_type || 'entity';
+      const subjName = typeof triple.subject === 'object' ? triple.subject.name : triple.subject;
+      const subjType = typeof triple.subject === 'object' ? triple.subject.type : 'entity';
       const pred = triple.predicate;
-      const objName = triple.object?.name || triple.object_name;
-      const objType = triple.object?.type || triple.object_type || 'entity';
+      const objName = typeof triple.object === 'object' ? triple.object.name : triple.object;
+      const objType = typeof triple.object === 'object' ? triple.object.type : 'entity';
 
       await this.conn.execute(
         `INSERT IGNORE INTO memori_subject(uuid, name, type, uniq) VALUES (?, ?, ?, ?)`,
         [randomUUID(), subjName, subjType, generateUniq([subjName, subjType])]
       );
-      const subjRes = await this.conn.execute(`SELECT id FROM memori_subject WHERE uniq = ?`, [
-        generateUniq([subjName, subjType]),
-      ]);
+      const subjRes = await this.conn.execute<{ id: number | string }>(
+        `SELECT id FROM memori_subject WHERE uniq = ?`,
+        [generateUniq([subjName, subjType])]
+      );
 
       await this.conn.execute(
         `INSERT IGNORE INTO memori_predicate(uuid, content, uniq) VALUES (?, ?, ?)`,
         [randomUUID(), pred, generateUniq([pred])]
       );
-      const predRes = await this.conn.execute(`SELECT id FROM memori_predicate WHERE uniq = ?`, [
-        generateUniq([pred]),
-      ]);
+      const predRes = await this.conn.execute<{ id: number | string }>(
+        `SELECT id FROM memori_predicate WHERE uniq = ?`,
+        [generateUniq([pred])]
+      );
 
       await this.conn.execute(
         `INSERT IGNORE INTO memori_object(uuid, name, type, uniq) VALUES (?, ?, ?, ?)`,
         [randomUUID(), objName, objType, generateUniq([objName, objType])]
       );
-      const objRes = await this.conn.execute(`SELECT id FROM memori_object WHERE uniq = ?`, [
-        generateUniq([objName, objType]),
-      ]);
+      const objRes = await this.conn.execute<{ id: number | string }>(
+        `SELECT id FROM memori_object WHERE uniq = ?`,
+        [generateUniq([objName, objType])]
+      );
 
       if (entityId && subjRes.length > 0 && predRes.length > 0 && objRes.length > 0) {
         await this.conn.execute(
@@ -246,14 +267,15 @@ class KnowledgeGraph {
 
 class Process {
   constructor(private readonly conn: StorageAdapter) {}
-  public async create(externalId: string): Promise<number | null> {
+  public async create(externalId: string | number): Promise<number | null> {
     await this.conn.execute(`INSERT IGNORE INTO memori_process(uuid, external_id) VALUES (?, ?)`, [
       randomUUID(),
       externalId,
     ]);
-    const res = await this.conn.execute(`SELECT id FROM memori_process WHERE external_id = ?`, [
-      externalId,
-    ]);
+    const res = await this.conn.execute<{ id: number | string }>(
+      `SELECT id FROM memori_process WHERE external_id = ?`,
+      [externalId]
+    );
     return res.length > 0 ? Number(res[0].id) : null;
   }
 }
@@ -261,7 +283,7 @@ class Process {
 class ProcessAttribute {
   constructor(private readonly conn: StorageAdapter) {}
   public async create(processId: number | string, attributes: string[]): Promise<this> {
-    if (!attributes || attributes.length === 0) return this;
+    if (attributes.length === 0) return this;
     for (const attribute of attributes) {
       await this.conn.execute(
         `INSERT INTO memori_process_attribute(uuid, process_id, content, num_times, date_last_time, uniq) VALUES (?, ?, ?, 1, CURRENT_TIMESTAMP, ?) ON DUPLICATE KEY UPDATE num_times = num_times + 1, date_last_time = CURRENT_TIMESTAMP`,
@@ -275,15 +297,18 @@ class ProcessAttribute {
 class Session {
   constructor(private readonly conn: StorageAdapter) {}
   public async create(
-    uuid: string,
-    entityId: number | string,
-    processId: number | string
+    uuid: string | number | null,
+    entityId: number | string | null,
+    processId: number | string | null
   ): Promise<number | null> {
     await this.conn.execute(
       `INSERT IGNORE INTO memori_session(uuid, entity_id, process_id) VALUES (?, ?, ?)`,
       [uuid, entityId, processId]
     );
-    const res = await this.conn.execute(`SELECT id FROM memori_session WHERE uuid = ?`, [uuid]);
+    const res = await this.conn.execute<{ id: number | string }>(
+      `SELECT id FROM memori_session WHERE uuid = ?`,
+      [uuid]
+    );
     return res.length > 0 ? Number(res[0].id) : null;
   }
 }
@@ -302,7 +327,7 @@ class SchemaVersion {
         `SELECT num FROM memori_schema_version`
       );
       return res.length > 0 ? Number(res[0].num) : null;
-    } catch (e) {
+    } catch {
       return null;
     }
   }
@@ -322,7 +347,11 @@ export class MysqlDriver extends BaseDriver {
     super(conn);
     this.conversationMessage = new ConversationMessage(conn);
     this.conversationMessages = new ConversationMessages(conn);
-    this.conversation = new Conversation(conn, this.conversationMessage, this.conversationMessages);
+    this.conversation = new Conversation(
+      conn,
+      this.conversationMessage as ConversationMessage,
+      this.conversationMessages as ConversationMessages
+    );
     this.entity = new Entity(conn);
     this.entityFact = new EntityFact(conn);
     this.knowledgeGraph = new KnowledgeGraph(conn);

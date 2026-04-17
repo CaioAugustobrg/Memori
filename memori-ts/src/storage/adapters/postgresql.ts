@@ -1,20 +1,27 @@
 import type { PoolClient, Pool } from 'pg';
-import { StorageAdapter } from '../base.js';
+import { StorageAdapter, SqlBindValue } from '../base.js';
 import { Registry } from '../registry.js';
 
-function isPostgresConnection(conn: any): boolean {
-  return conn && typeof conn.query === 'function' && typeof conn.execute !== 'function';
+function isPostgresConnection(conn: unknown): boolean {
+  return (
+    conn != null &&
+    typeof (conn as Pool).query === 'function' &&
+    typeof (conn as { execute?: unknown }).execute !== 'function'
+  );
 }
 
 export class PostgresAdapter implements StorageAdapter {
   private client: PoolClient | Pool;
-  constructor(conn: any) {
-    this.client = conn;
+  constructor(conn: unknown) {
+    this.client = conn as PoolClient | Pool;
   }
 
-  public async execute<T = any>(operation: string, binds: any[] = []): Promise<T[]> {
+  public async execute<T = Record<string, unknown>>(
+    operation: string,
+    binds: SqlBindValue[] = []
+  ): Promise<T[]> {
     const result = await this.client.query(operation, binds);
-    return result.rows;
+    return result.rows as T[];
   }
 
   public async begin(): Promise<void> {
@@ -32,9 +39,9 @@ export class PostgresAdapter implements StorageAdapter {
 
   public async close(): Promise<void> {
     if ('release' in this.client) {
-      (this.client as any).release();
-    } else if ('end' in this.client) {
-      await (this.client as any).end();
+      this.client.release();
+    } else {
+      await this.client.end();
     }
   }
 }

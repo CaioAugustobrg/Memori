@@ -1,7 +1,7 @@
 import { StorageAdapter, BaseDriver } from './base.js';
 
-type MatcherFn = (conn: any) => boolean;
-type AdapterConstructor = new (conn: any) => StorageAdapter;
+type MatcherFn = (conn: unknown) => boolean;
+type AdapterConstructor = new (conn: unknown) => StorageAdapter;
 type DriverConstructor = new (conn: StorageAdapter) => BaseDriver;
 
 export class Registry {
@@ -22,9 +22,8 @@ export class Registry {
     this.drivers.set(dialect, driverClass);
   }
 
-  public static getAdapter(rawConn: any): StorageAdapter {
-    // If the user passed a factory function, execute it to get the actual connection
-    const connToCheck = typeof rawConn === 'function' ? rawConn() : rawConn;
+  public static getAdapter(rawConn: unknown): StorageAdapter {
+    const connToCheck = typeof rawConn === 'function' ? (rawConn as () => unknown)() : rawConn;
 
     for (const [matcher, AdapterClass] of this.adapters.entries()) {
       if (matcher(connToCheck)) {

@@ -50,16 +50,16 @@ export class AugmentationEngine {
           process_id: this.config.processId,
           conversation_id: data.sessionId,
           conversation_messages: data.messages,
-          llm_provider: ctx.metadata?.provider as string | undefined,
+          llm_provider: ctx.metadata.provider as string | undefined,
           llm_model: req.model,
-          llm_provider_sdk_version: ctx.metadata?.sdkVersion as string | undefined,
-          platform_provider: ctx.metadata?.platform as string | undefined,
-          sdk_version: (ctx.metadata?.integrationSdkVersion as string | undefined) || SDK_VERSION,
+          llm_provider_sdk_version: ctx.metadata.sdkVersion as string | undefined,
+          platform_provider: ctx.metadata.platform as string | undefined,
+          sdk_version: (ctx.metadata.integrationSdkVersion as string | undefined) ?? SDK_VERSION,
           session_id: data.sessionId,
           storage_dialect: this.config.storage ? this.config.storage.getDialect() : null,
           storage_cockroachdb: this.config.storage?.getDialect() === 'cockroachdb',
         });
-      } catch (e) {
+      } catch (e: unknown) {
         if (this.config.testMode) console.warn('Local Augmentation failed:', e);
       }
       return Promise.resolve(res);
@@ -97,16 +97,16 @@ export class AugmentationEngine {
           process_id: this.config.processId,
           conversation_id: data.sessionId,
           conversation_messages: data.messages,
-          llm_provider: ctx.metadata?.provider as string | undefined,
+          llm_provider: ctx.metadata.provider as string | undefined,
           llm_model: req.model,
-          llm_provider_sdk_version: ctx.metadata?.sdkVersion as string | undefined,
-          platform_provider: ctx.metadata?.platform as string | undefined,
-          sdk_version: (ctx.metadata?.integrationSdkVersion as string | undefined) || SDK_VERSION,
+          llm_provider_sdk_version: ctx.metadata.sdkVersion as string | undefined,
+          platform_provider: ctx.metadata.platform as string | undefined,
+          sdk_version: (ctx.metadata.integrationSdkVersion as string | undefined) ?? SDK_VERSION,
           session_id: data.sessionId,
           storage_dialect: this.config.storage ? this.config.storage.getDialect() : null,
           storage_cockroachdb: this.config.storage?.getDialect() === 'cockroachdb',
         });
-      } catch (e) {
+      } catch (e: unknown) {
         if (this.config.testMode) console.warn('Local Agent Augmentation failed:', e);
       }
       return Promise.resolve(res);

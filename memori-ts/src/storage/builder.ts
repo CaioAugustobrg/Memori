@@ -21,10 +21,10 @@ export class Builder {
     // 1. Determine current schema version
     try {
       const res = await this.driver.schema.version.read();
-      if (res !== null && res !== undefined) {
-        currentVersion = Number(res);
+      if (res !== null) {
+        currentVersion = res;
       }
-    } catch (e) {
+    } catch {
       if (this.driver.requiresRollbackOnError) {
         await this.adapter.rollback();
       }
@@ -49,13 +49,14 @@ export class Builder {
 
     // 2. Run pending migrations sequentially
     let num = currentVersion;
-    while (true) {
+    for (;;) {
       num += 1;
-      if (!migrations[num]) break;
+      const batch = migrations[num];
+      if (!batch) break;
 
       if (this.displayBanner) console.log(`[Memori] Building revision #${num}...`);
 
-      for (const migration of migrations[num]) {
+      for (const migration of batch) {
         if (this.displayBanner) console.log(`  -> ${migration.description}`);
 
         const ops = migration.operations || (migration.operation ? [migration.operation] : []);

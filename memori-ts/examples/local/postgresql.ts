@@ -20,14 +20,15 @@ async function runPostgresTest() {
   try {
     await setupPool.query('CREATE DATABASE memori_test;');
     console.log('   [Setup] Successfully auto-created "memori_test" database.');
-  } catch (err: any) {
-    if (err.code === '42P04') {
+  } catch (err: unknown) {
+    const pgErr = err as { code?: string; message?: string };
+    if (pgErr.code === '42P04') {
       // 42P04 is the Postgres code for "database already exists" - this is fine!
     } else {
       console.error('\n🚨 CRITICAL DB ERROR 🚨');
       console.error('If you see "role does not exist" or "password authentication failed",');
       console.error('your Mac has a background Postgres app hijacking port 5432!');
-      console.error('Error Details:', err.message, '\n');
+      console.error('Error Details:', pgErr.message, '\n');
     }
   } finally {
     await setupPool.end();
@@ -48,7 +49,8 @@ async function runPostgresTest() {
   mem.attribution('pg-user', 'pg-test');
 
   console.log('🧱 2. Building Database Schema...');
-  await mem.config.storage!.build();
+  if (!mem.config.storage) throw new Error('Storage not initialized');
+  await mem.config.storage.build();
 
   console.log('\n💬 3. Sending teaching message...');
   await client.chat.completions.create({
@@ -90,7 +92,7 @@ async function runPostgresTest() {
   await mem.engine.waitForAugmentation();
 
   console.log('\n🧹 6. Cleaning up...');
-  await mem.config.storage!.close();
+  await mem.config.storage.close();
   console.log('✅ Test Complete!');
 }
 

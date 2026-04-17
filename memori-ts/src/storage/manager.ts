@@ -17,13 +17,25 @@ import './drivers/sqlite.js';
 import './adapters/mysql.js';
 import './drivers/mysql.js';
 
+/** SQLite sync write path uses only synchronous driver ops; narrow away `Promise` from BaseDriver unions. */
+function syncWriteResult<T>(value: T | Promise<T>): T {
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    typeof (value as Promise<unknown>).then === 'function'
+  ) {
+    throw new Error('[Memori] Async driver operation in SQLite sync write batch');
+  }
+  return value as T;
+}
+
 export class StorageManager implements StorageBridge {
   private readonly adapter: StorageAdapter;
   private readonly driver: BaseDriver;
   private readonly config: Config;
   private embedder?: (texts: string[]) => number[][];
 
-  constructor(rawConnection: any) {
+  constructor(rawConnection: unknown) {
     this.config = new Config();
     this.adapter = Registry.getAdapter(rawConnection);
     this.driver = Registry.getDriver(this.adapter);
@@ -65,35 +77,32 @@ export class StorageManager implements StorageBridge {
   }
 
   private writeBatchSync(batch: WriteBatch): WriteAck {
-    if (!batch.ops || batch.ops.length === 0) return { written_ops: 0 };
+    if (batch.ops.length === 0) return { written_ops: 0 };
     let written = 0;
 
     try {
-      this.adapter.begin(); // FIX: Safely call begin via the interface
+      void this.adapter.begin();
 
       for (const op of batch.ops) {
         switch (op.op_type) {
           case 'entity_fact.create': {
-            const eId = this.driver.entity.create(op.payload.entity_id);
+            const eId = syncWriteResult(this.driver.entity.create(op.payload.entity_id));
             const internalEntityId = eId || op.payload.entity_id;
             let factEmbeddings = op.payload.fact_embeddings;
             if (
               (!factEmbeddings || factEmbeddings.length === 0) &&
               this.embedder &&
-              op.payload.facts?.length > 0
+              op.payload.facts.length > 0
             ) {
               factEmbeddings = this.embedder(op.payload.facts);
             }
             let internalConvId = null;
             if (op.payload.conversation_id) {
-              const sId = this.driver.session.create(
-                op.payload.conversation_id,
-                internalEntityId,
-                null
+              const sId = syncWriteResult(
+                this.driver.session.create(op.payload.conversation_id, internalEntityId, null)
               );
-              internalConvId = this.driver.conversation.create(
-                sId || op.payload.conversation_id,
-                30
+              internalConvId = syncWriteResult(
+                this.driver.conversation.create(sId || op.payload.conversation_id, 30)
               );
             }
             this.driver.entityFact.create(
@@ -105,7 +114,7 @@ export class StorageManager implements StorageBridge {
             break;
           }
           case 'knowledge_graph.create': {
-            const eId = this.driver.entity.create(op.payload.entity_id);
+            const eId = syncWriteResult(this.driver.entity.create(op.payload.entity_id));
             this.driver.knowledgeGraph.create(
               eId || op.payload.entity_id,
               op.payload.semantic_triples
@@ -113,7 +122,7 @@ export class StorageManager implements StorageBridge {
             break;
           }
           case 'process_attribute.create': {
-            const pId = this.driver.process.create(op.payload.process_id);
+            const pId = syncWriteResult(this.driver.process.create(op.payload.process_id));
             this.driver.processAttribute.create(
               pId || op.payload.process_id,
               Array.isArray(op.payload.attributes)
@@ -123,8 +132,12 @@ export class StorageManager implements StorageBridge {
             break;
           }
           case 'conversation.update': {
-            const sId = this.driver.session.create(op.payload.conversation_id, null, null);
-            const convId = this.driver.conversation.create(sId || op.payload.conversation_id, 30);
+            const sId = syncWriteResult(
+              this.driver.session.create(op.payload.conversation_id, null, null)
+            );
+            const convId = syncWriteResult(
+              this.driver.conversation.create(sId || op.payload.conversation_id, 30)
+            );
             this.driver.conversation.update(
               convId || op.payload.conversation_id,
               op.payload.summary
@@ -132,9 +145,9 @@ export class StorageManager implements StorageBridge {
             break;
           }
           case 'upsert_fact': {
-            const eId = this.driver.entity.create(op.payload.entity_id);
+            const eId = syncWriteResult(this.driver.entity.create(op.payload.entity_id));
             if (op.payload.content)
-              this.driver.entityFact.createWithoutEmbedding(
+              void this.driver.entityFact.createWithoutEmbedding(
                 eId || op.payload.entity_id,
                 op.payload.content
               );
@@ -144,12 +157,14 @@ export class StorageManager implements StorageBridge {
         written++;
       }
 
-      this.adapter.commit();
+      void this.adapter.commit();
     } catch (e) {
       console.error(`[Memori] Sync WriteBatch failed, rolling back:`, e);
       try {
-        this.adapter.rollback();
-      } catch (err) {}
+        void this.adapter.rollback();
+      } catch {
+        // rollback failure is non-fatal
+      }
       return { written_ops: 0 };
     }
 
@@ -157,11 +172,11 @@ export class StorageManager implements StorageBridge {
   }
 
   private async writeBatchAsync(batch: WriteBatch): Promise<WriteAck> {
-    if (!batch.ops || batch.ops.length === 0) return { written_ops: 0 };
+    if (batch.ops.length === 0) return { written_ops: 0 };
     let written = 0;
 
     try {
-      await this.adapter.begin(); // FIX: Safely call begin via the interface
+      await this.adapter.begin();
 
       for (const op of batch.ops) {
         switch (op.op_type) {
@@ -172,7 +187,7 @@ export class StorageManager implements StorageBridge {
             if (
               (!factEmbeddings || factEmbeddings.length === 0) &&
               this.embedder &&
-              op.payload.facts?.length > 0
+              op.payload.facts.length > 0
             ) {
               factEmbeddings = this.embedder(op.payload.facts);
             }
@@ -244,7 +259,9 @@ export class StorageManager implements StorageBridge {
       console.error(`[Memori] Async WriteBatch failed, rolling back:`, e);
       try {
         await this.adapter.rollback();
-      } catch (err) {}
+      } catch {
+        // rollback failure is non-fatal
+      }
       return { written_ops: 0 };
     }
 
