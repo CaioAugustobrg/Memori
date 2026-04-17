@@ -61,7 +61,7 @@ interface ConversationOps {
 }
 
 interface EntityOps {
-  create(externalId: string | number): Promise<number | null> | number | string | null;
+  create(externalId: string | number): Promise<number | string | null> | number | string | null;
 }
 
 interface EntityFactOps {
@@ -84,7 +84,7 @@ interface KnowledgeGraphOps {
 }
 
 interface ProcessOps {
-  create(externalId: string | number): Promise<number | null> | number | string | null;
+  create(externalId: string | number): Promise<number | string | null> | number | string | null;
 }
 
 interface ProcessAttributeOps {
@@ -96,7 +96,7 @@ interface SessionOps {
     uuid: string | number | null,
     entityId: number | string | null,
     processId: number | string | null
-  ): Promise<number | null> | number | string | null;
+  ): Promise<number | string | null> | number | string | null;
 }
 
 export abstract class BaseDriver {

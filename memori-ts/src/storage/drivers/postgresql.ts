@@ -201,11 +201,19 @@ class EntityFact {
 
   public async getFactsByIds(factIds: (string | number)[]): Promise<CandidateFactRow[]> {
     if (factIds.length === 0) return [];
+
+    // Generate $1, $2, $3... placeholders based on the array length
+    const placeholders = factIds.map((_, i) => `$${i + 1}`).join(',');
+
     const factRows = await this.conn.execute<{
       id: number | string;
       content: string;
       date_created: string | Date;
-    }>(`SELECT id, content, date_created FROM memori_entity_fact WHERE id = ANY($1)`, [factIds]);
+    }>(
+      `SELECT id, content, date_created FROM memori_entity_fact WHERE id IN (${placeholders})`,
+      factIds // Spread the array items as standard binds
+    );
+
     if (factRows.length === 0) return [];
 
     const factsById = new Map<number, CandidateFactRow>();
@@ -228,9 +236,10 @@ class EntityFact {
       content: string;
       date_created: string | Date;
     }>(
-      `SELECT m.fact_id, c.summary AS content, COALESCE(c.date_updated, c.date_created) AS date_created FROM memori_entity_fact_mention m JOIN memori_conversation c ON c.id = m.conversation_id WHERE m.fact_id = ANY($1) AND c.summary IS NOT NULL AND c.summary <> ''`,
-      [factIds]
+      `SELECT m.fact_id, c.summary AS content, COALESCE(c.date_updated, c.date_created) AS date_created FROM memori_entity_fact_mention m JOIN memori_conversation c ON c.id = m.conversation_id WHERE m.fact_id IN (${placeholders}) AND c.summary IS NOT NULL AND c.summary <> ''`,
+      factIds
     );
+
     for (const row of summaryRows) {
       const fact = factsById.get(Number(row.fact_id));
       if (fact) {

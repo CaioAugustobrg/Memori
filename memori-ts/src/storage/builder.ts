@@ -61,6 +61,8 @@ export class Builder {
 
         const ops = migration.operations || (migration.operation ? [migration.operation] : []);
 
+        // FIX: Start a transaction before running the migration statements!
+        await this.adapter.begin();
         for (const operation of ops) {
           await this.adapter.execute(operation);
         }
@@ -69,6 +71,7 @@ export class Builder {
     }
 
     // 3. Update the schema version tracking table
+    await this.adapter.begin();
     await this.driver.schema.version.delete();
     await this.driver.schema.version.create(num - 1);
     await this.adapter.commit();
