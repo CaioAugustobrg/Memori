@@ -1,104 +1,51 @@
-use std::sync::Arc;
-use std::sync::mpsc;
-use std::time::Duration;
+#![deny(clippy::all)]
 
-use engine_orchestrator::augmentation::AugmentationInput;
-use engine_orchestrator::retrieval::RetrievalRequest;
+use engine_orchestrator::EngineOrchestrator;
 use engine_orchestrator::search::FactId;
 use engine_orchestrator::storage::{
-    CandidateFactRow, EmbeddingRow, FetchEmbeddingsRequest, FetchFactsByIdsRequest,
-    HostStorageError, StorageBridge, WriteAck, WriteBatch,
+    CandidateFactRow, EmbeddingRow, HostStorageError, StorageBridge, WriteAck, WriteBatch,
 };
-use engine_orchestrator::{EngineOrchestrator, OrchestratorError};
-use napi::bindgen_prelude::{FromNapiValue, Promise};
+use napi::bindgen_prelude::Float32Array;
+use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{
     ErrorStrategy, ThreadSafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode,
 };
-use napi::{Error, JsFunction, JsUnknown, Result, Status};
 use napi_derive::napi;
+use std::collections::HashMap;
+use std::panic::catch_unwind;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::oneshot;
 
+type PendingMap = Arc<Mutex<HashMap<u32, oneshot::Sender<String>>>>;
+
+// ---------------------------------------------------------------------------
+// 1. THE THREADSAFE JS BRIDGE (MANUAL CALLBACK RESOLUTION)
+// ---------------------------------------------------------------------------
 struct NodeStorageBridge {
-    fetch_embeddings_cb: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
-    fetch_facts_by_ids_cb: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
-    write_batch_cb: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
+    fetch_embeddings_tsfn: ThreadsafeFunction<(u32, String), ErrorStrategy::Fatal>,
+    fetch_facts_by_ids_tsfn: ThreadsafeFunction<(u32, String), ErrorStrategy::Fatal>,
+    write_batch_tsfn: ThreadsafeFunction<(u32, String), ErrorStrategy::Fatal>,
+    pending_requests: PendingMap,
+    next_id: AtomicU32,
 }
 
 impl NodeStorageBridge {
-    const CALLBACK_TIMEOUT: Duration = Duration::from_secs(30);
-
-    fn call_json(
-        callback: &ThreadsafeFunction<String, ErrorStrategy::Fatal>,
-        payload_json: String,
+    async fn call_js_async(
+        &self,
+        tsfn: &ThreadsafeFunction<(u32, String), ErrorStrategy::Fatal>,
+        payload: String,
     ) -> std::result::Result<String, HostStorageError> {
-        let (tx, rx) = mpsc::sync_channel::<String>(1);
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pending_requests.lock().unwrap().insert(id, tx);
 
-        let tokio_handle = napi::tokio::runtime::Handle::try_current().ok();
+        // FIX: Removed the Ok() wrapper, pass the tuple directly!
+        tsfn.call((id, payload), ThreadsafeFunctionCallMode::NonBlocking);
 
-        let status = callback.call_with_return_value(
-            payload_json,
-            ThreadsafeFunctionCallMode::Blocking,
-            move |js_return: JsUnknown| {
-                // 1. Promise (async PostgreSQL/MySQL)
-                if js_return.is_promise().unwrap_or(false) {
-                    let promise = Promise::<String>::from_unknown(js_return)?;
-                    let tx_inner = tx.clone();
-
-                    if let Some(handle) = tokio_handle {
-                        handle.spawn(async move {
-                            let out = match promise.await {
-                                Ok(s) => s,
-                                Err(_) => "[]".to_string(),
-                            };
-                            let _ = tx_inner.send(out);
-                        });
-                    } else {
-                        std::thread::spawn(move || {
-                            if let Ok(rt) = napi::tokio::runtime::Builder::new_current_thread()
-                                .enable_all()
-                                .build()
-                            {
-                                let out = match rt.block_on(promise) {
-                                    Ok(s) => s,
-                                    Err(_) => "[]".to_string(),
-                                };
-                                let _ = tx_inner.send(out);
-                            } else {
-                                let _ = tx_inner.send("[]".to_string());
-                            }
-                        });
-                    }
-
-                    return Ok(());
-                }
-
-                // 2. Direct string (sync SQLite)
-                // FIX: Explictly handle the nested Results without relying on Default
-                let out = match js_return.coerce_to_string() {
-                    Ok(val) => {
-                        if let Ok(utf8) = val.into_utf8() {
-                            utf8.as_str().unwrap_or("[]").to_string()
-                        } else {
-                            "[]".to_string()
-                        }
-                    }
-                    Err(_) => "[]".to_string(),
-                };
-
-                let _ = tx.send(out);
-                Ok(())
-            },
-        );
-
-        if status != Status::Ok {
-            return Err(HostStorageError::new(
-                "node_callback_failed",
-                format!("napi status: {:?}", status),
-            ));
-        }
-
-        rx.recv_timeout(Self::CALLBACK_TIMEOUT).map_err(|_| {
-            HostStorageError::new("node_callback_timeout", "timeout waiting for JS result")
-        })
+        // Wait for TypeScript to call `resolve_callback` which sends the data through `tx`
+        rx.await
+            .map_err(|_| HostStorageError::new("NAPI_ERR", "JS callback channel dropped"))
     }
 }
 
@@ -108,41 +55,58 @@ impl StorageBridge for NodeStorageBridge {
         entity_id: &str,
         limit: usize,
     ) -> std::result::Result<Vec<EmbeddingRow>, HostStorageError> {
-        let request = FetchEmbeddingsRequest {
-            entity_id: entity_id.to_string(),
-            limit,
-        };
-        let payload = serde_json::to_string(&request)
-            .map_err(|e| HostStorageError::new("serialization_error", e.to_string()))?;
-        let result = Self::call_json(&self.fetch_embeddings_cb, payload)?;
-        serde_json::from_str::<Vec<EmbeddingRow>>(&result)
-            .map_err(|e| HostStorageError::new("deserialization_error", e.to_string()))
+        let payload = serde_json::json!({ "entity_id": entity_id, "limit": limit }).to_string();
+
+        let js_result: String = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.call_js_async(&self.fetch_embeddings_tsfn, payload)
+                    .await
+            })
+        })?;
+
+        serde_json::from_str(&js_result)
+            .map_err(|e| HostStorageError::new("JSON_ERR", e.to_string()))
     }
 
     fn fetch_facts_by_ids(
         &self,
         ids: &[FactId],
     ) -> std::result::Result<Vec<CandidateFactRow>, HostStorageError> {
-        let request = FetchFactsByIdsRequest { ids: ids.to_vec() };
-        let payload = serde_json::to_string(&request)
-            .map_err(|e| HostStorageError::new("serialization_error", e.to_string()))?;
-        let result = Self::call_json(&self.fetch_facts_by_ids_cb, payload)?;
-        serde_json::from_str::<Vec<CandidateFactRow>>(&result)
-            .map_err(|e| HostStorageError::new("deserialization_error", e.to_string()))
+        let payload = serde_json::json!({ "ids": ids }).to_string();
+
+        let js_result: String = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                self.call_js_async(&self.fetch_facts_by_ids_tsfn, payload)
+                    .await
+            })
+        })?;
+
+        serde_json::from_str(&js_result)
+            .map_err(|e| HostStorageError::new("JSON_ERR", e.to_string()))
     }
 
     fn write_batch(&self, batch: &WriteBatch) -> std::result::Result<WriteAck, HostStorageError> {
         let payload = serde_json::to_string(batch)
-            .map_err(|e| HostStorageError::new("serialization_error", e.to_string()))?;
-        let result = Self::call_json(&self.write_batch_cb, payload)?;
-        serde_json::from_str::<WriteAck>(&result)
-            .map_err(|e| HostStorageError::new("deserialization_error", e.to_string()))
+            .map_err(|e| HostStorageError::new("JSON_ERR", e.to_string()))?;
+
+        let js_result: String = tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(async { self.call_js_async(&self.write_batch_tsfn, payload).await })
+        })?;
+
+        serde_json::from_str(&js_result)
+            .map_err(|e| HostStorageError::new("JSON_ERR", e.to_string()))
     }
 }
 
+// ---------------------------------------------------------------------------
+// 2. THE ENGINE EXPORT
+// ---------------------------------------------------------------------------
+
 #[napi]
 pub struct MemoriEngine {
-    orchestrator: Arc<EngineOrchestrator>,
+    inner: Arc<EngineOrchestrator>,
+    pending_requests: PendingMap,
 }
 
 #[napi]
@@ -150,133 +114,128 @@ impl MemoriEngine {
     #[napi(constructor)]
     pub fn new(
         model_name: Option<String>,
+        #[napi(ts_arg_type = "(id: number, reqJson: string) => void")]
         fetch_embeddings_cb: JsFunction,
+        #[napi(ts_arg_type = "(id: number, reqJson: string) => void")]
         fetch_facts_by_ids_cb: JsFunction,
-        write_batch_cb: JsFunction,
+        #[napi(ts_arg_type = "(id: number, reqJson: string) => void")] write_batch_cb: JsFunction,
     ) -> Result<Self> {
-        let fetch_embeddings_tsfn = fetch_embeddings_cb.create_threadsafe_function(
-            0,
-            |ctx: ThreadSafeCallContext<String>| {
-                ctx.env.create_string(ctx.value.as_str()).map(|v| vec![v])
-            },
-        )?;
-
-        let fetch_facts_tsfn = fetch_facts_by_ids_cb.create_threadsafe_function(
-            0,
-            |ctx: ThreadSafeCallContext<String>| {
-                ctx.env.create_string(ctx.value.as_str()).map(|v| vec![v])
-            },
-        )?;
-
-        let write_batch_tsfn = write_batch_cb.create_threadsafe_function(
-            0,
-            |ctx: ThreadSafeCallContext<String>| {
-                ctx.env.create_string(ctx.value.as_str()).map(|v| vec![v])
-            },
-        )?;
-
-        let bridge = NodeStorageBridge {
-            fetch_embeddings_cb: fetch_embeddings_tsfn,
-            fetch_facts_by_ids_cb: fetch_facts_tsfn,
-            write_batch_cb: write_batch_tsfn,
+        let build_tsfn = |js_func: JsFunction| -> Result<ThreadsafeFunction<(u32, String), ErrorStrategy::Fatal>> {
+            js_func.create_threadsafe_function(0, |ctx: ThreadSafeCallContext<(u32, String)>| {
+                let env = ctx.env;
+                let arg1 = env.create_uint32(ctx.value.0)?;
+                let arg2 = env.create_string(&ctx.value.1)?;
+                Ok(vec![arg1.into_unknown(), arg2.into_unknown()])
+            })
         };
 
-        let orchestrator = Arc::new(
-            EngineOrchestrator::new_with_storage(model_name.as_deref(), Some(Arc::new(bridge)))
-                .map_err(orchestrator_error_to_napi_error)?,
-        );
-        Ok(Self { orchestrator })
+        let pending_requests = Arc::new(Mutex::new(HashMap::new()));
+
+        let bridge = Arc::new(NodeStorageBridge {
+            fetch_embeddings_tsfn: build_tsfn(fetch_embeddings_cb)?,
+            fetch_facts_by_ids_tsfn: build_tsfn(fetch_facts_by_ids_cb)?,
+            write_batch_tsfn: build_tsfn(write_batch_cb)?,
+            pending_requests: pending_requests.clone(),
+            next_id: AtomicU32::new(1),
+        });
+
+        let inner = EngineOrchestrator::new_with_storage(model_name.as_deref(), Some(bridge))
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+
+        Ok(Self {
+            inner: Arc::new(inner),
+            pending_requests,
+        })
+    }
+
+    // TypeScript calls this method when its Promise finally resolves!
+    #[napi]
+    pub fn resolve_callback(&self, id: u32, result: String) {
+        if let Some(tx) = self.pending_requests.lock().unwrap().remove(&id) {
+            let _ = tx.send(result);
+        }
+    }
+
+    #[napi]
+    pub fn embed_texts(&self, texts: Vec<String>) -> Result<Vec<Float32Array>> {
+        let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (flat_vectors, shape) = self.inner.embed(texts);
+
+            let mut out = Vec::with_capacity(shape[0]);
+            let dim = shape[1];
+            for chunk in flat_vectors.chunks(dim) {
+                out.push(Float32Array::new(chunk.to_vec()));
+            }
+            Ok(out)
+        }));
+
+        match result {
+            Ok(Ok(arr)) => Ok(arr),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(Error::from_reason(
+                "Rust panicked during embed_texts!".to_string(),
+            )),
+        }
     }
 
     #[napi]
     pub async fn retrieve(&self, request_json: String) -> Result<String> {
-        let request: RetrievalRequest = serde_json::from_str(&request_json)
-            .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
-        let orch = self.orchestrator.clone();
-        napi::tokio::task::spawn_blocking(move || {
-            let ranked = orch
-                .retrieve(request)
-                .map_err(orchestrator_error_to_napi_error)?;
-            serde_json::to_string(&ranked)
-                .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let req = serde_json::from_str(&request_json)
+                .map_err(|e| Error::from_reason(format!("Invalid retrieval request: {}", e)))?;
+            let results = inner
+                .retrieve(req)
+                .map_err(|e| Error::from_reason(e.to_string()))?;
+            serde_json::to_string(&results).map_err(|e| Error::from_reason(e.to_string()))
         })
         .await
-        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
+        .map_err(|e| Error::from_reason(e.to_string()))?
     }
 
     #[napi]
     pub async fn recall(&self, request_json: String) -> Result<String> {
-        let request: RetrievalRequest = serde_json::from_str(&request_json)
-            .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
-        let orch = self.orchestrator.clone();
-        napi::tokio::task::spawn_blocking(move || {
-            orch.recall(request)
-                .map_err(orchestrator_error_to_napi_error)
+        let inner = self.inner.clone();
+        tokio::task::spawn_blocking(move || {
+            let req = serde_json::from_str(&request_json)
+                .map_err(|e| Error::from_reason(format!("Invalid recall request: {}", e)))?;
+            inner
+                .recall(req)
+                .map_err(|e| Error::from_reason(e.to_string()))
         })
         .await
-        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
-    }
-
-    #[napi]
-    pub async fn wait_for_augmentation(&self, timeout_ms: Option<u32>) -> Result<bool> {
-        let timeout = timeout_ms.map(|ms| Duration::from_millis(ms as u64));
-        let orch = self.orchestrator.clone();
-        napi::tokio::task::spawn_blocking(move || {
-            orch.wait_for_augmentation(timeout)
-                .map_err(orchestrator_error_to_napi_error)
-        })
-        .await
-        .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))?
+        .map_err(|e| Error::from_reason(e.to_string()))?
     }
 
     #[napi]
     pub fn submit_augmentation(&self, input_json: String) -> Result<String> {
-        let input: AugmentationInput = serde_json::from_str(&input_json)
-            .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
-        self.orchestrator
-            .submit_augmentation(input)
-            .map(|accepted| accepted.job_id.to_string())
-            .map_err(orchestrator_error_to_napi_error)
-    }
+        let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let input = serde_json::from_str(&input_json)
+                .map_err(|e| Error::from_reason(format!("Invalid augmentation input: {}", e)))?;
+            let accepted = self
+                .inner
+                .submit_augmentation(input)
+                .map_err(|e| Error::from_reason(e.to_string()))?;
+            Ok(accepted.job_id.to_string())
+        }));
 
-    #[napi]
-    pub fn embed_texts(&self, texts_json: String) -> Result<String> {
-        let texts: Vec<String> = serde_json::from_str(&texts_json)
-            .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?;
-        if texts.is_empty() {
-            return Ok("[]".to_string());
+        match result {
+            Ok(Ok(id)) => Ok(id),
+            Ok(Err(e)) => Err(e),
+            Err(_) => Err(Error::from_reason(
+                "Rust panicked during augmentation submit!".to_string(),
+            )),
         }
-        let (flat, shape) = self.orchestrator.embed(texts);
-        let num_texts = shape[0];
-        let dim = shape[1];
-        if num_texts == 0 || dim == 0 {
-            return Ok("[]".to_string());
-        }
-        let embeddings: Vec<Vec<f32>> = (0..num_texts)
-            .map(|i| flat[i * dim..(i + 1) * dim].to_vec())
-            .collect();
-        serde_json::to_string(&embeddings)
-            .map_err(|e| Error::new(Status::GenericFailure, e.to_string()))
     }
 
     #[napi]
-    pub fn execute(&self, command: String) -> Result<String> {
-        self.orchestrator
-            .execute(&command)
-            .map_err(orchestrator_error_to_napi_error)
-    }
+    pub async fn wait_for_augmentation(&self, timeout_ms: Option<u32>) -> Result<bool> {
+        let timeout = timeout_ms.map(|ms| std::time::Duration::from_millis(ms as u64));
+        let inner = self.inner.clone();
 
-    #[napi]
-    pub fn hello_world(&self) -> String {
-        self.orchestrator.hello_world()
+        tokio::task::spawn_blocking(move || inner.wait_for_augmentation(timeout))
+            .await
+            .map_err(|e| Error::from_reason(e.to_string()))?
+            .map_err(|e| Error::from_reason(e.to_string()))
     }
-}
-
-fn orchestrator_error_to_napi_error(error: OrchestratorError) -> Error {
-    let status = match error.status_code() {
-        1 | 2 => Status::InvalidArg,
-        3 => Status::QueueFull,
-        _ => Status::GenericFailure,
-    };
-    Error::new(status, error.to_string())
 }

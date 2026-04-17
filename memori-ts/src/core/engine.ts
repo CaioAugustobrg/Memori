@@ -12,59 +12,82 @@ export class NativeEngine {
       this._hasStorage = true;
       this.inner = new MemoriEngine(
         modelName || null,
-        (reqJson: string) => {
+        (id: number, reqJson: string) => {
           try {
             const req = JSON.parse(reqJson) as { entity_id: string; limit: number };
             const result = storageBridge.fetchEmbeddings(req.entity_id, req.limit);
             if (result instanceof Promise) {
-              return result
-                .then((res) => JSON.stringify(res))
+              result
+                .then((res) => {
+                  this.inner!.resolveCallback(id, JSON.stringify(res));
+                })
                 .catch((err: unknown) => {
                   console.error('[Memori] Bridge Error in fetchEmbeddings:', err);
-                  return '[]';
+                  this.inner!.resolveCallback(id, '[]');
                 });
+            } else {
+              this.inner!.resolveCallback(id, JSON.stringify(result));
             }
-            return JSON.stringify(result);
           } catch (e: unknown) {
             console.error('[Memori] Bridge Sync Error (fetchEmbeddings):', e);
-            return '[]';
+            this.inner!.resolveCallback(id, '[]');
           }
         },
-        (reqJson: string) => {
+        (id: number, reqJson: string) => {
           try {
             const req = JSON.parse(reqJson) as { ids: (number | string)[] };
             const result = storageBridge.fetchFactsByIds(req.ids);
             if (result instanceof Promise) {
-              return result
-                .then((res) => JSON.stringify(res))
+              result
+                .then((res) => {
+                  this.inner!.resolveCallback(id, JSON.stringify(res));
+                })
                 .catch((err: unknown) => {
                   console.error('[Memori] Bridge Error in fetchFactsByIds:', err);
-                  return '[]';
+                  this.inner!.resolveCallback(id, '[]');
                 });
+            } else {
+              this.inner!.resolveCallback(id, JSON.stringify(result));
             }
-            return JSON.stringify(result);
           } catch (e: unknown) {
             console.error('[Memori] Bridge Sync Error (fetchFactsByIds):', e);
-            return '[]';
+            this.inner!.resolveCallback(id, '[]');
           }
         },
-        (reqJson: string) => {
+        (id: number, reqJson: string) => {
           try {
             const req = JSON.parse(reqJson) as WriteBatch;
             const result = storageBridge.writeBatch(req);
             if (result instanceof Promise) {
-              return result
-                .then((res) => JSON.stringify(res))
+              result
+                .then((res) => {
+                  this.inner!.resolveCallback(id, JSON.stringify(res));
+                })
                 .catch((err: unknown) => {
                   console.error('[Memori] Bridge Error in writeBatch:', err);
-                  return JSON.stringify({ written_ops: 0 });
+                  this.inner!.resolveCallback(id, JSON.stringify({ written_ops: 0 }));
                 });
+            } else {
+              this.inner!.resolveCallback(id, JSON.stringify(result));
             }
-            return JSON.stringify(result);
           } catch (e: unknown) {
             console.error('[Memori] Bridge Sync Error (writeBatch):', e);
-            return JSON.stringify({ written_ops: 0 });
+            this.inner!.resolveCallback(id, JSON.stringify({ written_ops: 0 }));
           }
+        }
+      );
+    } else {
+      // Fallback Engine without Storage
+      this.inner = new MemoriEngine(
+        modelName || null,
+        (id: number) => {
+          this.inner!.resolveCallback(id, '[]');
+        },
+        (id: number) => {
+          this.inner!.resolveCallback(id, '[]');
+        },
+        (id: number) => {
+          this.inner!.resolveCallback(id, JSON.stringify({ written_ops: 0 }));
         }
       );
     }
@@ -85,11 +108,12 @@ export class NativeEngine {
     return await this.inner.recall(JSON.stringify(request));
   }
 
-  public embedTexts(texts: string[]): number[][] {
+  public embedTexts(texts: string[]): Float32Array[] {
     if (!this.inner || texts.length === 0) return [];
     try {
-      return JSON.parse(this.inner.embedTexts(JSON.stringify(texts))) as number[][];
-    } catch {
+      return this.inner.embedTexts(texts);
+    } catch (e: unknown) {
+      console.error('[Memori] Bridge Sync Error (embedTexts):', e);
       return [];
     }
   }

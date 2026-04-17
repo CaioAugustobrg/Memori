@@ -1,6 +1,6 @@
 export interface EmbeddingRow {
   id: number | string;
-  content_embedding?: number[];
+  content_embedding?: Float32Array;
   content_embedding_b64?: string;
 }
 
@@ -28,7 +28,7 @@ export type WriteOp =
         entity_id: string | number;
         facts: string[];
         conversation_id?: string | number | null;
-        fact_embeddings?: number[][];
+        fact_embeddings?: Float32Array[];
       };
     }
   | {

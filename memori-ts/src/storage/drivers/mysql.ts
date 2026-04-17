@@ -12,9 +12,8 @@ function generateUniq(inputs: string[]): string {
   return hash.digest('hex');
 }
 
-function formatEmbeddingForDb(embedding: number[]): Buffer {
-  const float32Array = new Float32Array(embedding);
-  return Buffer.from(float32Array.buffer);
+function formatEmbeddingForDb(embedding: Float32Array): Buffer {
+  return Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
 }
 
 class ConversationMessage {
@@ -106,13 +105,17 @@ class EntityFact {
   public async create(
     entityId: number | string,
     facts: string[],
-    factEmbeddings?: number[][],
+    factEmbeddings?: Float32Array[],
     conversationId?: number | string | null
   ): Promise<this> {
     if (facts.length === 0) return this;
     for (let i = 0; i < facts.length; i++) {
       const fact = facts[i];
-      const embedding = factEmbeddings && i < factEmbeddings.length ? factEmbeddings[i] : [];
+      const embedding =
+        factEmbeddings && i < factEmbeddings.length ? factEmbeddings[i] : new Float32Array(0);
+      if (embedding.length === 0) {
+        continue;
+      }
       if (embedding.length === 0) continue;
       const embeddingFormatted = formatEmbeddingForDb(embedding);
       const uniq = generateUniq([fact]);

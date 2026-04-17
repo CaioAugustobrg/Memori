@@ -33,7 +33,7 @@ export class StorageManager implements StorageBridge {
   private readonly adapter: StorageAdapter;
   private readonly driver: BaseDriver;
   private readonly config: Config;
-  private embedder?: (texts: string[]) => number[][];
+  private embedder?: (texts: string[]) => Float32Array[];
 
   constructor(rawConnection: unknown) {
     this.config = new Config();
@@ -41,7 +41,7 @@ export class StorageManager implements StorageBridge {
     this.driver = Registry.getDriver(this.adapter);
   }
 
-  public setEmbedder(fn: (texts: string[]) => number[][]): void {
+  public setEmbedder(fn: (texts: string[]) => Float32Array[]): void {
     this.embedder = fn;
   }
 
@@ -153,6 +153,13 @@ export class StorageManager implements StorageBridge {
               );
             break;
           }
+          default: {
+            const _exhaustiveCheck: never = op;
+            console.warn(
+              `[Memori] Unhandled write operation type: ${(op as { op_type: string }).op_type}`
+            );
+            break;
+          }
         }
         written++;
       }
@@ -248,6 +255,13 @@ export class StorageManager implements StorageBridge {
                 eId || op.payload.entity_id,
                 op.payload.content
               );
+            break;
+          }
+          default: {
+            const _exhaustiveCheck: never = op;
+            console.warn(
+              `[Memori] Unhandled write operation type: ${(op as { op_type: string }).op_type}`
+            );
             break;
           }
         }

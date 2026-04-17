@@ -68,7 +68,7 @@ interface EntityFactOps {
   create(
     entityId: number | string,
     facts: string[],
-    factEmbeddings?: number[][],
+    factEmbeddings?: Float32Array[],
     conversationId?: number | string | null
   ): unknown;
   createWithoutEmbedding(entityId: number | string, content: string): Promise<void> | void;

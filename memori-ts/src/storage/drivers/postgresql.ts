@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { StorageAdapter, BaseDriver } from '../base.js';
+import { StorageAdapter, BaseDriver, SqlBindValue } from '../base.js';
 import { postgresqlMigrations } from '../migrations/postgresql.js';
 import { Registry } from '../registry.js';
 import { CandidateFactRow, SemanticTriplePayload } from '../../types/storage.js';
@@ -12,9 +12,8 @@ function generateUniq(inputs: string[]): string {
   return hash.digest('hex');
 }
 
-function formatEmbeddingForDb(embedding: number[]): Buffer {
-  const float32Array = new Float32Array(embedding);
-  return Buffer.from(float32Array.buffer);
+function formatEmbeddingForDb(embedding: Float32Array): Buffer {
+  return Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
 }
 
 class ConversationMessage {
@@ -105,32 +104,69 @@ class EntityFact {
   public async create(
     entityId: number | string,
     facts: string[],
-    factEmbeddings?: number[][],
+    factEmbeddings?: Float32Array[],
     conversationId?: number | string | null
   ): Promise<this> {
     if (facts.length === 0) return this;
+
+    const values: SqlBindValue[] = [];
+    const placeholders: string[] = [];
+    let paramIdx = 1;
+
+    // 1. Build the Bulk Insert Arrays
     for (let i = 0; i < facts.length; i++) {
       const fact = facts[i];
-      const embedding = factEmbeddings && i < factEmbeddings.length ? factEmbeddings[i] : [];
-      if (embedding.length === 0) continue;
-      const embeddingFormatted = formatEmbeddingForDb(embedding);
-      const uniq = generateUniq([fact]);
+      const embedding =
+        factEmbeddings && i < factEmbeddings.length ? factEmbeddings[i] : new Float32Array(0);
+      if (embedding.length === 0) {
+        continue;
+      }
 
-      await this.conn.execute(
-        `INSERT INTO memori_entity_fact(uuid, entity_id, content, content_embedding, num_times, date_last_time, uniq) VALUES ($1, $2, $3, $4, 1, CURRENT_TIMESTAMP, $5) ON CONFLICT (entity_id, uniq) DO UPDATE SET num_times = memori_entity_fact.num_times + 1, date_last_time = CURRENT_TIMESTAMP`,
-        [randomUUID(), entityId, fact, embeddingFormatted, uniq]
+      const embeddingFormatted = formatEmbeddingForDb(embedding);
+      const uniq = generateUniq([fact]); // Still using sync node:crypto
+
+      // ($1, $2, $3, $4, 1, CURRENT_TIMESTAMP, $5)
+      placeholders.push(
+        `($${paramIdx++}, $${paramIdx++}, $${paramIdx++}, $${paramIdx++}, 1, CURRENT_TIMESTAMP, $${paramIdx++})`
       );
-      if (conversationId) {
-        const factRow = await this.conn.execute<{ id: number | string }>(
-          `SELECT id FROM memori_entity_fact WHERE entity_id = $1 AND uniq = $2`,
-          [entityId, uniq]
-        );
-        if (factRow.length > 0) {
-          await this.conn.execute(
-            `INSERT INTO memori_entity_fact_mention(uuid, entity_id, fact_id, conversation_id) VALUES ($1, $2, $3, $4) ON CONFLICT (entity_id, fact_id, conversation_id) DO NOTHING`,
-            [randomUUID(), entityId, factRow[0].id, conversationId]
-          );
+      values.push(randomUUID(), entityId, fact, embeddingFormatted, uniq);
+    }
+
+    if (values.length === 0) return this;
+
+    // 2. Execute a single Bulk Insert
+    await this.conn.execute(
+      `INSERT INTO memori_entity_fact(uuid, entity_id, content, content_embedding, num_times, date_last_time, uniq) 
+       VALUES ${placeholders.join(', ')} 
+       ON CONFLICT (entity_id, uniq) DO UPDATE 
+       SET num_times = memori_entity_fact.num_times + 1, date_last_time = CURRENT_TIMESTAMP`,
+      values
+    );
+
+    // 3. Handle Conversation Linking (if applicable)
+    if (conversationId) {
+      // Fetch the IDs we just inserted/updated
+      const insertedFacts = await this.conn.execute<{ id: number | string }>(
+        `SELECT id FROM memori_entity_fact WHERE entity_id = $1 ORDER BY date_last_time DESC LIMIT $2`,
+        [entityId, facts.length]
+      );
+
+      if (insertedFacts.length > 0) {
+        const linkValues: SqlBindValue[] = [];
+        const linkPlaceholders: string[] = [];
+        let linkIdx = 1;
+
+        for (const row of insertedFacts) {
+          linkPlaceholders.push(`($${linkIdx++}, $${linkIdx++}, $${linkIdx++}, $${linkIdx++})`);
+          linkValues.push(randomUUID(), entityId, row.id, conversationId);
         }
+
+        await this.conn.execute(
+          `INSERT INTO memori_entity_fact_mention(uuid, entity_id, fact_id, conversation_id) 
+           VALUES ${linkPlaceholders.join(', ')} 
+           ON CONFLICT (entity_id, fact_id, conversation_id) DO NOTHING`,
+          linkValues
+        );
       }
     }
     return this;
