@@ -1,4 +1,3 @@
-// scripts/sync-native.js
 import fs from 'node:fs';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
@@ -6,7 +5,7 @@ import { execSync } from 'node:child_process';
 const ROOT = process.cwd();
 const RUST_BINDINGS_DIR = path.resolve(ROOT, '../rust-core/bindings/node');
 const SRC_NATIVE = path.resolve(ROOT, 'src/native');
-const DIST_NATIVE = path.resolve(ROOT, 'dist/src/native'); // Adjust path based on your tsc output
+const DIST_NATIVE = path.resolve(ROOT, 'dist/src/native');
 
 function copyFolderSync(from, to) {
   if (!fs.existsSync(from)) return;
@@ -27,10 +26,10 @@ function copyFolderSync(from, to) {
 }
 
 function sync() {
-  console.log('🦀 Building Rust artifacts...');
+  console.log('Building Rust artifacts...');
   execSync('npm run build', { cwd: RUST_BINDINGS_DIR, stdio: 'inherit' });
 
-  console.log('📦 Syncing to src/native...');
+  console.log('Syncing to src/native...');
   copyFolderSync(RUST_BINDINGS_DIR, SRC_NATIVE);
 
   // If we've already built the TS, sync to dist too so examples run immediately
