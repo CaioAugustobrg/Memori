@@ -1,5 +1,11 @@
 import { MemoriEngine } from '/Users/rpkruse/src/memori/python-sdk/rust-core/bindings/node/index.js';
-import { StorageBridge, WriteBatch } from '../types/storage.js';
+import {
+  StorageBridge,
+  WriteBatch,
+  EmbeddingRow,
+  CandidateFactRow,
+  WriteAck,
+} from '../types/storage.js';
 import { RetrievalRequest, RecallObject } from '../types/api.js';
 import { AugmentationInput } from '../types/integrations.js';
 
@@ -13,89 +19,68 @@ export class NativeEngine {
       this.inner = new MemoriEngine(
         modelName || null,
         (id: number, reqJson: string) => {
-          try {
-            const req = JSON.parse(reqJson) as { entity_id: string; limit: number };
-            const result = storageBridge.fetchEmbeddings(req.entity_id, req.limit);
-
-            const handleRes = (res: any[]) => {
-              const napiRes = res.map((r) => ({ id: r.id, contentEmbedding: r.content_embedding }));
-              this.inner!.resolveEmbeddingsCallback(id, napiRes);
-            };
-
-            if (result instanceof Promise) {
-              result.then(handleRes).catch((err: unknown) => {
-                console.error('[Memori] Bridge Error in fetchEmbeddings:', err);
-                this.inner!.resolveEmbeddingsCallback(id, []);
-              });
-            } else {
-              handleRes(result);
-            }
-          } catch (e: unknown) {
-            console.error('[Memori] Bridge Sync Error (fetchEmbeddings):', e);
-            this.inner!.resolveEmbeddingsCallback(id, []);
-          }
+          this.handleBridgeCall<EmbeddingRow[]>(
+            id,
+            'fetchEmbeddings',
+            () => {
+              const req = JSON.parse(reqJson) as { entity_id: string; limit: number };
+              return storageBridge.fetchEmbeddings(req.entity_id, req.limit);
+            },
+            (res) =>
+              this.inner?.resolveEmbeddingsCallback(
+                id,
+                res.map((r) => ({
+                  id: r.id,
+                  contentEmbedding: r.content_embedding ?? new Float32Array(0),
+                }))
+              ),
+            () => this.inner?.resolveEmbeddingsCallback(id, [])
+          );
         },
         (id: number, reqJson: string) => {
-          try {
-            const req = JSON.parse(reqJson) as { ids: (number | string)[] };
-            const result = storageBridge.fetchFactsByIds(req.ids);
-
-            const handleRes = (res: any[]) => {
-              const napiRes = res.map((r) => ({
-                id: r.id,
-                content: r.content,
-                dateCreated: r.date_created,
-                summaries: r.summaries?.map((s: any) => ({
-                  content: s.content,
-                  dateCreated: s.date_created,
-                })),
-              }));
-              this.inner!.resolveFactsCallback(id, napiRes);
-            };
-
-            if (result instanceof Promise) {
-              result.then(handleRes).catch((err: unknown) => {
-                console.error('[Memori] Bridge Error in fetchFactsByIds:', err);
-                this.inner!.resolveFactsCallback(id, []);
-              });
-            } else {
-              handleRes(result);
-            }
-          } catch (e: unknown) {
-            console.error('[Memori] Bridge Sync Error (fetchFactsByIds):', e);
-            this.inner!.resolveFactsCallback(id, []);
-          }
+          this.handleBridgeCall<CandidateFactRow[]>(
+            id,
+            'fetchFactsByIds',
+            () => {
+              const req = JSON.parse(reqJson) as { ids: (number | string)[] };
+              return storageBridge.fetchFactsByIds(req.ids);
+            },
+            (res) =>
+              this.inner?.resolveFactsCallback(
+                id,
+                res.map((r) => ({
+                  id: r.id,
+                  content: r.content,
+                  dateCreated: r.date_created,
+                  summaries: r.summaries?.map((s) => ({
+                    content: s.content,
+                    dateCreated: s.date_created,
+                  })),
+                }))
+              ),
+            () => this.inner?.resolveFactsCallback(id, [])
+          );
         },
         (id: number, reqJson: string) => {
-          try {
-            const req = JSON.parse(reqJson) as WriteBatch;
-            const result = storageBridge.writeBatch(req);
-
-            const handleRes = (res: any) => {
-              this.inner!.resolveWriteCallback(id, { writtenOps: res.written_ops });
-            };
-
-            if (result instanceof Promise) {
-              result.then(handleRes).catch((err: unknown) => {
-                console.error('[Memori] Bridge Error in writeBatch:', err);
-                this.inner!.resolveWriteCallback(id, { writtenOps: 0 });
-              });
-            } else {
-              handleRes(result);
-            }
-          } catch (e: unknown) {
-            console.error('[Memori] Bridge Sync Error (writeBatch):', e);
-            this.inner!.resolveWriteCallback(id, { writtenOps: 0 });
-          }
+          this.handleBridgeCall<WriteAck>(
+            id,
+            'writeBatch',
+            () => {
+              const req = JSON.parse(reqJson) as WriteBatch;
+              return storageBridge.writeBatch(req);
+            },
+            (res) => this.inner?.resolveWriteCallback(id, { writtenOps: res.written_ops }),
+            () => this.inner?.resolveWriteCallback(id, { writtenOps: 0 })
+          );
         }
       );
     } else {
       // Fallback Engine without Storage
       this.inner = new MemoriEngine(
         modelName || null,
-        (id: number) => this.inner!.resolveEmbeddingsCallback(id, []),
-        (id: number) => this.inner!.resolveFactsCallback(id, []),
-        (id: number) => this.inner!.resolveWriteCallback(id, { writtenOps: 0 })
+        (id: number) => this.inner?.resolveEmbeddingsCallback(id, []),
+        (id: number) => this.inner?.resolveFactsCallback(id, []),
+        (id: number) => this.inner?.resolveWriteCallback(id, { writtenOps: 0 })
       );
     }
   }
@@ -104,29 +89,56 @@ export class NativeEngine {
     return this._hasStorage;
   }
 
+  /**
+   * Helper to execute storage bridge callbacks safely, handling both async Promises
+   * and sync returns, while catching all crossing boundary errors.
+   */
+  private handleBridgeCall<TRes>(
+    id: number,
+    operationName: string,
+    executeFn: () => Promise<TRes> | TRes,
+    successCb: (res: TRes) => void,
+    fallbackCb: () => void
+  ) {
+    try {
+      const result = executeFn();
+
+      if (result instanceof Promise) {
+        result.then(successCb).catch((err: unknown) => {
+          console.error(`[Memori] Bridge Error in ${operationName}:`, err);
+          fallbackCb();
+        });
+      } else {
+        successCb(result);
+      }
+    } catch (e: unknown) {
+      console.error(`[Memori] Bridge Sync Error (${operationName}):`, e);
+      fallbackCb();
+    }
+  }
+
   public async retrieve(request: RetrievalRequest): Promise<RecallObject[]> {
     if (!this.inner) throw new Error('Native engine not initialized.');
 
-    const napiReq = {
+    const napiResults = await this.inner.retrieve({
       entityId: request.entity_id,
       queryText: request.query_text,
       denseLimit: request.dense_limit,
       limit: request.limit,
-    };
+    });
 
-    const napiResults = await this.inner.retrieve(napiReq);
-
-    return napiResults.map((r: any) => ({
+    // Map N-API camelCase back to TS snake_case
+    return napiResults.map((r) => ({
       id: r.id,
       content: r.content,
-      rank_score: r.rankScore,
-      similarity: r.similarity,
-      date_created: r.dateCreated,
-      summaries: r.summaries?.map((s: any) => ({
+      rank_score: r.rankScore ?? undefined,
+      similarity: r.similarity ?? undefined,
+      date_created: r.dateCreated ?? undefined,
+      summaries: r.summaries?.map((s) => ({
         content: s.content,
         date_created: s.dateCreated,
-        entity_fact_id: s.entityFactId,
-        fact_id: s.factId,
+        entity_fact_id: s.entityFactId as number,
+        fact_id: s.factId as number,
       })),
     }));
   }
@@ -134,14 +146,12 @@ export class NativeEngine {
   public async recall(request: RetrievalRequest): Promise<string> {
     if (!this.inner) throw new Error('Native engine not initialized.');
 
-    const napiReq = {
+    return await this.inner.recall({
       entityId: request.entity_id,
       queryText: request.query_text,
       denseLimit: request.dense_limit,
       limit: request.limit,
-    };
-
-    return await this.inner.recall(napiReq);
+    });
   }
 
   public embedTexts(texts: string[]): Float32Array[] {
@@ -157,7 +167,7 @@ export class NativeEngine {
   public submitAugmentation(input: AugmentationInput): string {
     if (!this.inner) throw new Error('Native engine not initialized.');
 
-    const napiInput = {
+    return this.inner.submitAugmentation({
       entityId: input.entity_id,
       processId: input.process_id ?? undefined,
       conversationId: input.conversation_id ?? undefined,
@@ -175,9 +185,7 @@ export class NativeEngine {
       sessionId: input.session_id ?? undefined,
       factId: input.fact_id ?? undefined,
       content: input.content ?? undefined,
-    };
-
-    return this.inner.submitAugmentation(napiInput);
+    });
   }
 
   public async waitForAugmentation(timeoutMs?: number): Promise<boolean> {

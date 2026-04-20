@@ -32,8 +32,10 @@ async function runTypeOrmTest() {
   await mem.engine.waitForAugmentation();
 
   // Verification using TypeORM's query runner
-  const entities = await dataSource.query('SELECT id, external_id FROM memori_entity');
-  const facts = await dataSource.query('SELECT id, entity_id, content FROM memori_entity_fact');
+  const entities = await dataSource.query<unknown[]>('SELECT id, external_id FROM memori_entity');
+  const facts = await dataSource.query<unknown[]>(
+    'SELECT id, entity_id, content FROM memori_entity_fact'
+  );
 
   console.log(`\n[DB Check] Entities: ${entities.length}, Facts: ${facts.length}`);
 

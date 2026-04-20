@@ -3,6 +3,7 @@ import { StorageAdapter, BaseDriver } from '../base.js';
 import { sqliteMigrations } from '../migrations/sqlite.js';
 import { Registry } from '../registry.js';
 import { CandidateFactRow, SemanticTriplePayload } from '../../types/storage.js';
+import { bufferToFloat32Array } from '../../utils/utils.js';
 
 function generateUniq(inputs: string[]): string {
   const hash = createHash('sha256');
@@ -178,15 +179,9 @@ class EntityFact {
           r.content_embedding != null && r.content_embedding.length > 0
       )
       .map((r) => {
-        const buf = r.content_embedding;
-        const isAligned = buf.byteOffset % 4 === 0;
-        const floatArray = isAligned
-          ? new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4)
-          : new Float32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
-
         return {
-          id: r.id, // Note: SQLite doesn't need Number() casting here
-          content_embedding: floatArray,
+          id: r.id,
+          content_embedding: bufferToFloat32Array(r.content_embedding),
         };
       });
   }

@@ -56,7 +56,7 @@ export class MikroOrmAdapter implements StorageAdapter {
   public getDialect(): string {
     // FIX: Safely inspect the Platform class name instead of relying on deprecated config keys
     const platform = this.connection.getPlatform();
-    const name = platform?.constructor?.name || '';
+    const name = platform.constructor.name;
 
     if (name.includes('PostgreSql') || name.includes('Pg')) return 'postgresql';
     if (name.includes('MySql') || name.includes('MariaDb')) return 'mysql';

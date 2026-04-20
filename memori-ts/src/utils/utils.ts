@@ -164,3 +164,15 @@ export function extractHistory(response: CloudRecallResponse): unknown[] {
 export function extractLastUserMessage(messages: Message[]): string | undefined {
   return messages.findLast((m) => m.role === 'user')?.content;
 }
+
+/**
+ * Safely converts a Node.js Buffer to a Float32Array using zero-copy memory sharing
+ * when perfectly aligned, or falls back to a fast slice copy if unaligned.
+ * @internal
+ */
+export function bufferToFloat32Array(buf: Buffer): Float32Array {
+  const isAligned = buf.byteOffset % 4 === 0;
+  return isAligned
+    ? new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4)
+    : new Float32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+}
