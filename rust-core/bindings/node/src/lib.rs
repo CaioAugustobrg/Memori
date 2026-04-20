@@ -11,6 +11,7 @@ use napi::threadsafe_function::{
     ErrorStrategy, ThreadSafeCallContext, ThreadsafeFunction, ThreadsafeFunctionCallMode,
 };
 use napi_derive::napi;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::panic::catch_unwind;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -20,7 +21,103 @@ use tokio::sync::oneshot;
 type PendingMap = Arc<Mutex<HashMap<u32, oneshot::Sender<String>>>>;
 
 // ---------------------------------------------------------------------------
-// 1. THE THREADSAFE JS BRIDGE (MANUAL CALLBACK RESOLUTION)
+// 1. N-API STRUCT DEFINITIONS (PHASE 1 OPTIMIZATION)
+// ---------------------------------------------------------------------------
+
+#[napi(object)]
+#[derive(Serialize, Deserialize)]
+pub struct NapiRetrievalRequest {
+    pub entity_id: String,
+    pub query_text: String,
+    pub dense_limit: u32,
+    pub limit: u32,
+}
+
+#[napi(object)]
+#[derive(Serialize, Deserialize)]
+pub struct NapiRecallSummary {
+    pub content: String,
+    pub date_created: String,
+    // Safely handle missing IDs from the engine
+    pub entity_fact_id: Option<i64>,
+    pub fact_id: Option<i64>,
+}
+
+#[napi(object)]
+#[derive(Serialize, Deserialize)]
+pub struct NapiRecallObject {
+    pub id: i64,
+    pub content: String,
+    pub rank_score: Option<f64>,
+    pub similarity: Option<f64>,
+    pub date_created: Option<String>,
+    pub summaries: Option<Vec<NapiRecallSummary>>,
+}
+
+#[napi(object)]
+#[derive(Serialize, Deserialize)]
+pub struct NapiMessage {
+    pub role: String,
+    pub content: String,
+}
+
+#[napi(object)]
+#[derive(Serialize, Deserialize)]
+pub struct NapiAugmentationInput {
+    pub entity_id: String,
+
+    // Strip keys entirely if they are undefined/None to prevent "null" panics
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conversation_messages: Option<Vec<NapiMessage>>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_prompt: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_provider: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_model: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_provider_sdk_version: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub framework: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform_provider: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_dialect: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_cockroachdb: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sdk_version: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub use_mock_response: Option<bool>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fact_id: Option<String>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// 2. THE THREADSAFE JS BRIDGE (MANUAL CALLBACK RESOLUTION)
 // ---------------------------------------------------------------------------
 struct NodeStorageBridge {
     fetch_embeddings_tsfn: ThreadsafeFunction<(u32, String), ErrorStrategy::Fatal>,
@@ -40,10 +137,8 @@ impl NodeStorageBridge {
         let (tx, rx) = oneshot::channel();
         self.pending_requests.lock().unwrap().insert(id, tx);
 
-        // FIX: Removed the Ok() wrapper, pass the tuple directly!
         tsfn.call((id, payload), ThreadsafeFunctionCallMode::NonBlocking);
 
-        // Wait for TypeScript to call `resolve_callback` which sends the data through `tx`
         rx.await
             .map_err(|_| HostStorageError::new("NAPI_ERR", "JS callback channel dropped"))
     }
@@ -100,7 +195,7 @@ impl StorageBridge for NodeStorageBridge {
 }
 
 // ---------------------------------------------------------------------------
-// 2. THE ENGINE EXPORT
+// 3. THE ENGINE EXPORT
 // ---------------------------------------------------------------------------
 
 #[napi]
@@ -148,7 +243,6 @@ impl MemoriEngine {
         })
     }
 
-    // TypeScript calls this method when its Promise finally resolves!
     #[napi]
     pub fn resolve_callback(&self, id: u32, result: String) {
         if let Some(tx) = self.pending_requests.lock().unwrap().remove(&id) {
@@ -179,26 +273,34 @@ impl MemoriEngine {
     }
 
     #[napi]
-    pub async fn retrieve(&self, request_json: String) -> Result<String> {
+    pub async fn retrieve(&self, request: NapiRetrievalRequest) -> Result<Vec<NapiRecallObject>> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
-            let req = serde_json::from_str(&request_json)
+            // Bridge via internal Serde values to avoid guessing opaque engine_orchestrator types
+            let req = serde_json::from_value(serde_json::to_value(&request).unwrap())
                 .map_err(|e| Error::from_reason(format!("Invalid retrieval request: {}", e)))?;
+
             let results = inner
                 .retrieve(req)
                 .map_err(|e| Error::from_reason(e.to_string()))?;
-            serde_json::to_string(&results).map_err(|e| Error::from_reason(e.to_string()))
+
+            let napi_results: Vec<NapiRecallObject> =
+                serde_json::from_value(serde_json::to_value(&results).unwrap())
+                    .map_err(|e| Error::from_reason(e.to_string()))?;
+
+            Ok(napi_results)
         })
         .await
         .map_err(|e| Error::from_reason(e.to_string()))?
     }
 
     #[napi]
-    pub async fn recall(&self, request_json: String) -> Result<String> {
+    pub async fn recall(&self, request: NapiRetrievalRequest) -> Result<String> {
         let inner = self.inner.clone();
         tokio::task::spawn_blocking(move || {
-            let req = serde_json::from_str(&request_json)
+            let req = serde_json::from_value(serde_json::to_value(&request).unwrap())
                 .map_err(|e| Error::from_reason(format!("Invalid recall request: {}", e)))?;
+
             inner
                 .recall(req)
                 .map_err(|e| Error::from_reason(e.to_string()))
@@ -208,14 +310,16 @@ impl MemoriEngine {
     }
 
     #[napi]
-    pub fn submit_augmentation(&self, input_json: String) -> Result<String> {
+    pub fn submit_augmentation(&self, input: NapiAugmentationInput) -> Result<String> {
         let result = catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let input = serde_json::from_str(&input_json)
+            let core_input = serde_json::from_value(serde_json::to_value(&input).unwrap())
                 .map_err(|e| Error::from_reason(format!("Invalid augmentation input: {}", e)))?;
+
             let accepted = self
                 .inner
-                .submit_augmentation(input)
+                .submit_augmentation(core_input)
                 .map_err(|e| Error::from_reason(e.to_string()))?;
+
             Ok(accepted.job_id.to_string())
         }));
 

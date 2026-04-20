@@ -99,13 +99,45 @@ export class NativeEngine {
 
   public async retrieve(request: RetrievalRequest): Promise<RecallObject[]> {
     if (!this.inner) throw new Error('Native engine not initialized.');
-    const resJson = await this.inner.retrieve(JSON.stringify(request));
-    return JSON.parse(resJson) as RecallObject[];
+
+    // Map TS snake_case into N-API camelCase
+    const napiReq = {
+      entityId: request.entity_id,
+      queryText: request.query_text,
+      denseLimit: request.dense_limit,
+      limit: request.limit,
+    };
+
+    // Fast call into Rust without JSON stringify
+    const napiResults = await this.inner.retrieve(napiReq);
+
+    // Map N-API camelCase back to Memori's expected TS snake_case
+    return napiResults.map((r: any) => ({
+      id: r.id,
+      content: r.content,
+      rank_score: r.rankScore,
+      similarity: r.similarity,
+      date_created: r.dateCreated,
+      summaries: r.summaries?.map((s: any) => ({
+        content: s.content,
+        date_created: s.dateCreated,
+        entity_fact_id: s.entityFactId,
+        fact_id: s.factId,
+      })),
+    }));
   }
 
   public async recall(request: RetrievalRequest): Promise<string> {
     if (!this.inner) throw new Error('Native engine not initialized.');
-    return await this.inner.recall(JSON.stringify(request));
+
+    const napiReq = {
+      entityId: request.entity_id,
+      queryText: request.query_text,
+      denseLimit: request.dense_limit,
+      limit: request.limit,
+    };
+
+    return await this.inner.recall(napiReq);
   }
 
   public embedTexts(texts: string[]): Float32Array[] {
@@ -120,7 +152,29 @@ export class NativeEngine {
 
   public submitAugmentation(input: AugmentationInput): string {
     if (!this.inner) throw new Error('Native engine not initialized.');
-    return this.inner.submitAugmentation(JSON.stringify(input));
+
+    // Map TS snake_case into N-API camelCase, converting nulls to undefined
+    const napiInput = {
+      entityId: input.entity_id,
+      processId: input.process_id ?? undefined,
+      conversationId: input.conversation_id ?? undefined,
+      conversationMessages: input.conversation_messages ?? undefined,
+      systemPrompt: input.system_prompt ?? undefined,
+      llmProvider: input.llm_provider ?? undefined,
+      llmModel: input.llm_model ?? undefined,
+      llmProviderSdkVersion: input.llm_provider_sdk_version ?? undefined,
+      framework: input.framework ?? undefined,
+      platformProvider: input.platform_provider ?? undefined,
+      storageDialect: input.storage_dialect ?? undefined,
+      storageCockroachdb: input.storage_cockroachdb ?? undefined,
+      sdkVersion: input.sdk_version ?? undefined,
+      useMockResponse: input.use_mock_response ?? undefined,
+      sessionId: input.session_id ?? undefined,
+      factId: input.fact_id ?? undefined,
+      content: input.content ?? undefined,
+    };
+
+    return this.inner.submitAugmentation(napiInput);
   }
 
   public async waitForAugmentation(timeoutMs?: number): Promise<boolean> {
