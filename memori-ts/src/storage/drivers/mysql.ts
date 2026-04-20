@@ -161,10 +161,19 @@ class EntityFact {
         (r): r is { id: number | string; content_embedding: Buffer } =>
           r.content_embedding != null && r.content_embedding.length > 0
       )
-      .map((r) => ({
-        id: Number(r.id),
-        content_embedding_b64: Buffer.from(r.content_embedding).toString('base64'),
-      }));
+      .map((r) => {
+        const buf = r.content_embedding;
+        // Zero-copy if memory is perfectly aligned, otherwise fallback to an aligned copy
+        const isAligned = buf.byteOffset % 4 === 0;
+        const floatArray = isAligned
+          ? new Float32Array(buf.buffer, buf.byteOffset, buf.byteLength / 4)
+          : new Float32Array(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+
+        return {
+          id: Number(r.id),
+          content_embedding: floatArray,
+        };
+      });
   }
 
   public async getFactsByIds(factIds: (string | number)[]): Promise<CandidateFactRow[]> {

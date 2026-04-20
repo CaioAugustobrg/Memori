@@ -16,63 +16,76 @@ export class NativeEngine {
           try {
             const req = JSON.parse(reqJson) as { entity_id: string; limit: number };
             const result = storageBridge.fetchEmbeddings(req.entity_id, req.limit);
+
+            const handleRes = (res: any[]) => {
+              const napiRes = res.map((r) => ({ id: r.id, contentEmbedding: r.content_embedding }));
+              this.inner!.resolveEmbeddingsCallback(id, napiRes);
+            };
+
             if (result instanceof Promise) {
-              result
-                .then((res) => {
-                  this.inner!.resolveCallback(id, JSON.stringify(res));
-                })
-                .catch((err: unknown) => {
-                  console.error('[Memori] Bridge Error in fetchEmbeddings:', err);
-                  this.inner!.resolveCallback(id, '[]');
-                });
+              result.then(handleRes).catch((err: unknown) => {
+                console.error('[Memori] Bridge Error in fetchEmbeddings:', err);
+                this.inner!.resolveEmbeddingsCallback(id, []);
+              });
             } else {
-              this.inner!.resolveCallback(id, JSON.stringify(result));
+              handleRes(result);
             }
           } catch (e: unknown) {
             console.error('[Memori] Bridge Sync Error (fetchEmbeddings):', e);
-            this.inner!.resolveCallback(id, '[]');
+            this.inner!.resolveEmbeddingsCallback(id, []);
           }
         },
         (id: number, reqJson: string) => {
           try {
             const req = JSON.parse(reqJson) as { ids: (number | string)[] };
             const result = storageBridge.fetchFactsByIds(req.ids);
+
+            const handleRes = (res: any[]) => {
+              const napiRes = res.map((r) => ({
+                id: r.id,
+                content: r.content,
+                dateCreated: r.date_created,
+                summaries: r.summaries?.map((s: any) => ({
+                  content: s.content,
+                  dateCreated: s.date_created,
+                })),
+              }));
+              this.inner!.resolveFactsCallback(id, napiRes);
+            };
+
             if (result instanceof Promise) {
-              result
-                .then((res) => {
-                  this.inner!.resolveCallback(id, JSON.stringify(res));
-                })
-                .catch((err: unknown) => {
-                  console.error('[Memori] Bridge Error in fetchFactsByIds:', err);
-                  this.inner!.resolveCallback(id, '[]');
-                });
+              result.then(handleRes).catch((err: unknown) => {
+                console.error('[Memori] Bridge Error in fetchFactsByIds:', err);
+                this.inner!.resolveFactsCallback(id, []);
+              });
             } else {
-              this.inner!.resolveCallback(id, JSON.stringify(result));
+              handleRes(result);
             }
           } catch (e: unknown) {
             console.error('[Memori] Bridge Sync Error (fetchFactsByIds):', e);
-            this.inner!.resolveCallback(id, '[]');
+            this.inner!.resolveFactsCallback(id, []);
           }
         },
         (id: number, reqJson: string) => {
           try {
             const req = JSON.parse(reqJson) as WriteBatch;
             const result = storageBridge.writeBatch(req);
+
+            const handleRes = (res: any) => {
+              this.inner!.resolveWriteCallback(id, { writtenOps: res.written_ops });
+            };
+
             if (result instanceof Promise) {
-              result
-                .then((res) => {
-                  this.inner!.resolveCallback(id, JSON.stringify(res));
-                })
-                .catch((err: unknown) => {
-                  console.error('[Memori] Bridge Error in writeBatch:', err);
-                  this.inner!.resolveCallback(id, JSON.stringify({ written_ops: 0 }));
-                });
+              result.then(handleRes).catch((err: unknown) => {
+                console.error('[Memori] Bridge Error in writeBatch:', err);
+                this.inner!.resolveWriteCallback(id, { writtenOps: 0 });
+              });
             } else {
-              this.inner!.resolveCallback(id, JSON.stringify(result));
+              handleRes(result);
             }
           } catch (e: unknown) {
             console.error('[Memori] Bridge Sync Error (writeBatch):', e);
-            this.inner!.resolveCallback(id, JSON.stringify({ written_ops: 0 }));
+            this.inner!.resolveWriteCallback(id, { writtenOps: 0 });
           }
         }
       );
@@ -80,15 +93,9 @@ export class NativeEngine {
       // Fallback Engine without Storage
       this.inner = new MemoriEngine(
         modelName || null,
-        (id: number) => {
-          this.inner!.resolveCallback(id, '[]');
-        },
-        (id: number) => {
-          this.inner!.resolveCallback(id, '[]');
-        },
-        (id: number) => {
-          this.inner!.resolveCallback(id, JSON.stringify({ written_ops: 0 }));
-        }
+        (id: number) => this.inner!.resolveEmbeddingsCallback(id, []),
+        (id: number) => this.inner!.resolveFactsCallback(id, []),
+        (id: number) => this.inner!.resolveWriteCallback(id, { writtenOps: 0 })
       );
     }
   }
@@ -100,7 +107,6 @@ export class NativeEngine {
   public async retrieve(request: RetrievalRequest): Promise<RecallObject[]> {
     if (!this.inner) throw new Error('Native engine not initialized.');
 
-    // Map TS snake_case into N-API camelCase
     const napiReq = {
       entityId: request.entity_id,
       queryText: request.query_text,
@@ -108,10 +114,8 @@ export class NativeEngine {
       limit: request.limit,
     };
 
-    // Fast call into Rust without JSON stringify
     const napiResults = await this.inner.retrieve(napiReq);
 
-    // Map N-API camelCase back to Memori's expected TS snake_case
     return napiResults.map((r: any) => ({
       id: r.id,
       content: r.content,
@@ -153,7 +157,6 @@ export class NativeEngine {
   public submitAugmentation(input: AugmentationInput): string {
     if (!this.inner) throw new Error('Native engine not initialized.');
 
-    // Map TS snake_case into N-API camelCase, converting nulls to undefined
     const napiInput = {
       entityId: input.entity_id,
       processId: input.process_id ?? undefined,

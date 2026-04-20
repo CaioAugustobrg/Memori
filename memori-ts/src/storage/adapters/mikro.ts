@@ -62,7 +62,9 @@ export class MikroOrmAdapter implements StorageAdapter {
     if (name.includes('MySql') || name.includes('MariaDb')) return 'mysql';
     if (name.includes('Sqlite')) return 'sqlite';
 
-    throw new Error(`[Memori] Unable to determine dialect for MikroORM instance. Platform: ${name}`);
+    throw new Error(
+      `[Memori] Unable to determine dialect for MikroORM instance. Platform: ${name}`
+    );
   }
 
   public close(): Promise<void> {

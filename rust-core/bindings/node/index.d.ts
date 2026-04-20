@@ -46,9 +46,28 @@ export interface NapiAugmentationInput {
   factId?: string
   content?: string
 }
+export interface NapiEmbeddingRow {
+  id: number | string
+  contentEmbedding: Float32Array
+}
+export interface NapiCandidateSummaryRow {
+  content: string
+  dateCreated: string
+}
+export interface NapiCandidateFactRow {
+  id: number | string
+  content: string
+  dateCreated: string
+  summaries?: Array<NapiCandidateSummaryRow>
+}
+export interface NapiWriteAck {
+  writtenOps: number
+}
 export declare class MemoriEngine {
   constructor(modelName: string | undefined | null, fetchEmbeddingsCb: (id: number, reqJson: string) => void, fetchFactsByIdsCb: (id: number, reqJson: string) => void, writeBatchCb: (id: number, reqJson: string) => void)
-  resolveCallback(id: number, result: string): void
+  resolveEmbeddingsCallback(id: number, result: Array<NapiEmbeddingRow>): void
+  resolveFactsCallback(id: number, result: Array<NapiCandidateFactRow>): void
+  resolveWriteCallback(id: number, result: NapiWriteAck): void
   embedTexts(texts: Array<string>): Array<Float32Array>
   retrieve(request: NapiRetrievalRequest): Promise<Array<NapiRecallObject>>
   recall(request: NapiRetrievalRequest): Promise<string>

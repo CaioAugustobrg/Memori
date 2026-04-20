@@ -5,6 +5,7 @@ use engine_orchestrator::search::FactId;
 use engine_orchestrator::storage::{
     CandidateFactRow, EmbeddingRow, HostStorageError, StorageBridge, WriteAck, WriteBatch,
 };
+use napi::Either;
 use napi::bindgen_prelude::Float32Array;
 use napi::bindgen_prelude::*;
 use napi::threadsafe_function::{
@@ -18,10 +19,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
-type PendingMap = Arc<Mutex<HashMap<u32, oneshot::Sender<String>>>>;
-
 // ---------------------------------------------------------------------------
-// 1. N-API STRUCT DEFINITIONS (PHASE 1 OPTIMIZATION)
+// 1. PHASE 1: CORE API N-API STRUCTS
 // ---------------------------------------------------------------------------
 
 #[napi(object)]
@@ -38,7 +37,6 @@ pub struct NapiRetrievalRequest {
 pub struct NapiRecallSummary {
     pub content: String,
     pub date_created: String,
-    // Safely handle missing IDs from the engine
     pub entity_fact_id: Option<i64>,
     pub fact_id: Option<i64>,
 }
@@ -66,7 +64,6 @@ pub struct NapiMessage {
 pub struct NapiAugmentationInput {
     pub entity_id: String,
 
-    // Strip keys entirely if they are undefined/None to prevent "null" panics
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_id: Option<String>,
 
@@ -117,31 +114,50 @@ pub struct NapiAugmentationInput {
 }
 
 // ---------------------------------------------------------------------------
-// 2. THE THREADSAFE JS BRIDGE (MANUAL CALLBACK RESOLUTION)
+// 2. PHASE 2/3: ZERO-COPY STORAGE BRIDGE N-API STRUCTS
+// ---------------------------------------------------------------------------
+
+#[napi(object)]
+pub struct NapiEmbeddingRow {
+    pub id: Either<i64, String>,
+    pub content_embedding: Float32Array,
+}
+
+#[napi(object)]
+#[derive(Serialize)]
+pub struct NapiCandidateSummaryRow {
+    pub content: String,
+    pub date_created: String,
+}
+
+#[napi(object)]
+pub struct NapiCandidateFactRow {
+    pub id: Either<i64, String>,
+    pub content: String,
+    pub date_created: String,
+    pub summaries: Option<Vec<NapiCandidateSummaryRow>>,
+}
+
+#[napi(object)]
+pub struct NapiWriteAck {
+    pub written_ops: u32,
+}
+
+type PendingEmbeddingsMap = Arc<Mutex<HashMap<u32, oneshot::Sender<Vec<EmbeddingRow>>>>>;
+type PendingFactsMap = Arc<Mutex<HashMap<u32, oneshot::Sender<Vec<CandidateFactRow>>>>>;
+type PendingWritesMap = Arc<Mutex<HashMap<u32, oneshot::Sender<WriteAck>>>>;
+
+// ---------------------------------------------------------------------------
+// 3. THE THREADSAFE JS BRIDGE (Zero-Copy Callbacks)
 // ---------------------------------------------------------------------------
 struct NodeStorageBridge {
     fetch_embeddings_tsfn: ThreadsafeFunction<(u32, String), ErrorStrategy::Fatal>,
     fetch_facts_by_ids_tsfn: ThreadsafeFunction<(u32, String), ErrorStrategy::Fatal>,
     write_batch_tsfn: ThreadsafeFunction<(u32, String), ErrorStrategy::Fatal>,
-    pending_requests: PendingMap,
+    pending_embeddings: PendingEmbeddingsMap,
+    pending_facts: PendingFactsMap,
+    pending_writes: PendingWritesMap,
     next_id: AtomicU32,
-}
-
-impl NodeStorageBridge {
-    async fn call_js_async(
-        &self,
-        tsfn: &ThreadsafeFunction<(u32, String), ErrorStrategy::Fatal>,
-        payload: String,
-    ) -> std::result::Result<String, HostStorageError> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = oneshot::channel();
-        self.pending_requests.lock().unwrap().insert(id, tx);
-
-        tsfn.call((id, payload), ThreadsafeFunctionCallMode::NonBlocking);
-
-        rx.await
-            .map_err(|_| HostStorageError::new("NAPI_ERR", "JS callback channel dropped"))
-    }
 }
 
 impl StorageBridge for NodeStorageBridge {
@@ -151,16 +167,19 @@ impl StorageBridge for NodeStorageBridge {
         limit: usize,
     ) -> std::result::Result<Vec<EmbeddingRow>, HostStorageError> {
         let payload = serde_json::json!({ "entity_id": entity_id, "limit": limit }).to_string();
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pending_embeddings.lock().unwrap().insert(id, tx);
 
-        let js_result: String = tokio::task::block_in_place(|| {
+        self.fetch_embeddings_tsfn
+            .call((id, payload), ThreadsafeFunctionCallMode::NonBlocking);
+
+        tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                self.call_js_async(&self.fetch_embeddings_tsfn, payload)
-                    .await
+                rx.await
+                    .map_err(|_| HostStorageError::new("NAPI_ERR", "Channel dropped"))
             })
-        })?;
-
-        serde_json::from_str(&js_result)
-            .map_err(|e| HostStorageError::new("JSON_ERR", e.to_string()))
+        })
     }
 
     fn fetch_facts_by_ids(
@@ -168,40 +187,50 @@ impl StorageBridge for NodeStorageBridge {
         ids: &[FactId],
     ) -> std::result::Result<Vec<CandidateFactRow>, HostStorageError> {
         let payload = serde_json::json!({ "ids": ids }).to_string();
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pending_facts.lock().unwrap().insert(id, tx);
 
-        let js_result: String = tokio::task::block_in_place(|| {
+        self.fetch_facts_by_ids_tsfn
+            .call((id, payload), ThreadsafeFunctionCallMode::NonBlocking);
+
+        tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                self.call_js_async(&self.fetch_facts_by_ids_tsfn, payload)
-                    .await
+                rx.await
+                    .map_err(|_| HostStorageError::new("NAPI_ERR", "Channel dropped"))
             })
-        })?;
-
-        serde_json::from_str(&js_result)
-            .map_err(|e| HostStorageError::new("JSON_ERR", e.to_string()))
+        })
     }
 
     fn write_batch(&self, batch: &WriteBatch) -> std::result::Result<WriteAck, HostStorageError> {
         let payload = serde_json::to_string(batch)
             .map_err(|e| HostStorageError::new("JSON_ERR", e.to_string()))?;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let (tx, rx) = oneshot::channel();
+        self.pending_writes.lock().unwrap().insert(id, tx);
 
-        let js_result: String = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(async { self.call_js_async(&self.write_batch_tsfn, payload).await })
-        })?;
+        self.write_batch_tsfn
+            .call((id, payload), ThreadsafeFunctionCallMode::NonBlocking);
 
-        serde_json::from_str(&js_result)
-            .map_err(|e| HostStorageError::new("JSON_ERR", e.to_string()))
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                rx.await
+                    .map_err(|_| HostStorageError::new("NAPI_ERR", "Channel dropped"))
+            })
+        })
     }
 }
 
 // ---------------------------------------------------------------------------
-// 3. THE ENGINE EXPORT
+// 4. THE ENGINE EXPORT
 // ---------------------------------------------------------------------------
 
 #[napi]
 pub struct MemoriEngine {
     inner: Arc<EngineOrchestrator>,
-    pending_requests: PendingMap,
+    pending_embeddings: PendingEmbeddingsMap,
+    pending_facts: PendingFactsMap,
+    pending_writes: PendingWritesMap,
 }
 
 #[napi]
@@ -224,13 +253,17 @@ impl MemoriEngine {
             })
         };
 
-        let pending_requests = Arc::new(Mutex::new(HashMap::new()));
+        let pending_embeddings = Arc::new(Mutex::new(HashMap::new()));
+        let pending_facts = Arc::new(Mutex::new(HashMap::new()));
+        let pending_writes = Arc::new(Mutex::new(HashMap::new()));
 
         let bridge = Arc::new(NodeStorageBridge {
             fetch_embeddings_tsfn: build_tsfn(fetch_embeddings_cb)?,
             fetch_facts_by_ids_tsfn: build_tsfn(fetch_facts_by_ids_cb)?,
             write_batch_tsfn: build_tsfn(write_batch_cb)?,
-            pending_requests: pending_requests.clone(),
+            pending_embeddings: pending_embeddings.clone(),
+            pending_facts: pending_facts.clone(),
+            pending_writes: pending_writes.clone(),
             next_id: AtomicU32::new(1),
         });
 
@@ -239,14 +272,82 @@ impl MemoriEngine {
 
         Ok(Self {
             inner: Arc::new(inner),
-            pending_requests,
+            pending_embeddings,
+            pending_facts,
+            pending_writes,
         })
     }
 
     #[napi]
-    pub fn resolve_callback(&self, id: u32, result: String) {
-        if let Some(tx) = self.pending_requests.lock().unwrap().remove(&id) {
-            let _ = tx.send(result);
+    pub fn resolve_embeddings_callback(&self, id: u32, result: Vec<NapiEmbeddingRow>) {
+        // Collect directly into a Vec, no Result needed
+        let rows: Vec<EmbeddingRow> = result
+            .into_iter()
+            .map(|r| {
+                let id_val = match r.id {
+                    Either::A(num) => serde_json::json!(num),
+                    Either::B(s) => serde_json::json!(s),
+                };
+
+                // This is the Magic Zero-Copy! The f32s are pulled directly from V8 Memory
+                let floats = r.content_embedding.to_vec();
+
+                let mut obj = serde_json::Map::new();
+                obj.insert("id".to_string(), id_val);
+                obj.insert("content_embedding".to_string(), serde_json::json!(floats));
+
+                // Unwrap directly since we strictly control the shape of this object
+                serde_json::from_value(serde_json::Value::Object(obj)).unwrap()
+            })
+            .collect();
+
+        if let Some(tx) = self.pending_embeddings.lock().unwrap().remove(&id) {
+            let _ = tx.send(rows);
+        }
+    }
+
+    #[napi]
+    pub fn resolve_facts_callback(&self, id: u32, result: Vec<NapiCandidateFactRow>) {
+        // Collect directly into a Vec, no Result needed
+        let rows: Vec<CandidateFactRow> = result
+            .into_iter()
+            .map(|r| {
+                let id_val = match r.id {
+                    Either::A(num) => serde_json::json!(num),
+                    Either::B(s) => serde_json::json!(s),
+                };
+
+                let mut obj = serde_json::Map::new();
+                obj.insert("id".to_string(), id_val);
+                obj.insert("content".to_string(), serde_json::json!(r.content));
+                obj.insert(
+                    "date_created".to_string(),
+                    serde_json::json!(r.date_created),
+                );
+                if let Some(sums) = r.summaries {
+                    obj.insert("summaries".to_string(), serde_json::to_value(sums).unwrap());
+                }
+
+                // Unwrap directly since we strictly control the shape of this object
+                serde_json::from_value(serde_json::Value::Object(obj)).unwrap()
+            })
+            .collect();
+
+        if let Some(tx) = self.pending_facts.lock().unwrap().remove(&id) {
+            let _ = tx.send(rows);
+        }
+    }
+
+    #[napi]
+    pub fn resolve_write_callback(&self, id: u32, result: NapiWriteAck) {
+        if let Some(tx) = self.pending_writes.lock().unwrap().remove(&id) {
+            let mut obj = serde_json::Map::new();
+            obj.insert(
+                "written_ops".to_string(),
+                serde_json::json!(result.written_ops),
+            );
+            let ack: WriteAck = serde_json::from_value(serde_json::Value::Object(obj)).unwrap();
+            let _ = tx.send(ack);
         }
     }
 

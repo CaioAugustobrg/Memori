@@ -5,7 +5,7 @@ import { OpenAI } from 'openai';
 import { Memori } from '../../src/index.js';
 
 // MikroORM strictly requires at least one entity to boot.
-// Since Memori manages its own raw tables, we create a dummy schema 
+// Since Memori manages its own raw tables, we create a dummy schema
 // just to satisfy the MikroORM initialization in this isolated test.
 const DummyEntity = new EntitySchema({
   name: 'Dummy',
@@ -25,7 +25,7 @@ async function runMikroTest() {
   });
 
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  
+
   // Pass the EntityManager (orm.em) to Memori
   const mem = new Memori({ conn: orm.em }).llm.register(client);
   mem.attribution('mikro-user', 'mikro-test');
@@ -44,9 +44,13 @@ async function runMikroTest() {
   await mem.engine.waitForAugmentation();
 
   // Verification using MikroORM's raw connection
-  const entities = await orm.em.getConnection().execute('SELECT id, external_id FROM memori_entity');
-  const facts = await orm.em.getConnection().execute('SELECT id, entity_id, content FROM memori_entity_fact');
-  
+  const entities = await orm.em
+    .getConnection()
+    .execute('SELECT id, external_id FROM memori_entity');
+  const facts = await orm.em
+    .getConnection()
+    .execute('SELECT id, entity_id, content FROM memori_entity_fact');
+
   console.log(`\n[DB Check] Entities: ${entities.length}, Facts: ${facts.length}`);
 
   console.log('\n🧠 5. Testing Recall...');
@@ -71,7 +75,7 @@ async function runMikroTest() {
   await mem.engine.waitForAugmentation();
 
   console.log('\n🧹 6. Cleaning up...');
-  await mem.config.storage.close(); 
+  await mem.config.storage.close();
   await orm.close();
   console.log('✅ MikroORM Test Complete!');
 }
