@@ -35,41 +35,16 @@ export class RecallEngine {
     if (this.engine.hasStorage) {
       if (!this.config.entityId) return [];
       try {
-        // engine.retrieve crosses the Rust/JS bridge asynchronously — must be awaited
-        const results = await this.engine.retrieve({
-          entity_id: this.config.entityId,
-          query_text: query,
-          dense_limit: 100, // candidate pool fetched from storage before re-ranking
-          limit: 10, // final number of facts returned to the caller
-        });
-
-        return results.map((r) => ({
-          content: r.content,
-          score: r.rank_score ?? r.similarity ?? 0,
-          dateCreated: r.date_created,
-          summaries: r.summaries?.map((s) => ({
-            content: s.content,
-            dateCreated: s.date_created,
-          })),
-        }));
+        return await this.retrieveLocal(query);
       } catch (e) {
         console.warn('Local Manual Recall failed:', e);
         return [];
       }
     }
 
-    const payload = {
-      attribution: {
-        entity: { id: this.config.entityId },
-        process: { id: this.config.processId },
-      },
-      query,
-      session: { id: this.session.id },
-    };
-
     try {
-      const response = await this.api.post<CloudRecallResponse>('cloud/recall', payload);
-      return extractFacts(response);
+      const { facts } = await this.retrieveCloud(query);
+      return facts;
     } catch (e) {
       console.warn('Memori Manual Recall failed:', e);
       return [];
@@ -92,54 +67,18 @@ export class RecallEngine {
     if (this.engine.hasStorage) {
       if (!this.config.entityId) return req;
       try {
-        // engine.retrieve crosses the Rust/JS bridge asynchronously — must be awaited
-        const rawFacts = await this.engine.retrieve({
-          entity_id: this.config.entityId,
-          query_text: userQuery,
-          dense_limit: 100, // candidate pool fetched from storage before re-ranking
-          limit: 10, // final number of facts injected into the prompt
-        });
-
-        facts = rawFacts.map((r) => ({
-          content: r.content,
-          score: r.rank_score ?? r.similarity ?? 0,
-          dateCreated: r.date_created,
-          summaries: r.summaries?.map((s) => ({
-            content: s.content,
-            dateCreated: s.date_created,
-          })),
-        }));
+        facts = await this.retrieveLocal(userQuery);
       } catch (e) {
         console.warn('Local Recall Hook failed:', e);
         return req;
       }
     } else {
-      const payload = {
-        attribution: {
-          entity: { id: this.config.entityId },
-          process: { id: this.config.processId },
-        },
-        query: userQuery,
-        session: { id: sessionId },
-      };
-
-      let response: CloudRecallResponse;
       try {
-        response = await this.api.post<CloudRecallResponse>('cloud/recall', payload);
+        ({ facts, history: historyMessages } = await this.retrieveCloud(userQuery));
       } catch (e) {
         console.warn('Memori Recall failed:', e);
         return req;
       }
-
-      facts = extractFacts(response);
-      const historyRaw = extractHistory(response);
-
-      historyMessages = (historyRaw as Array<{ role: Role; content?: unknown; text?: string }>)
-        .filter((m) => m.role !== 'system')
-        .map((m) => ({
-          role: m.role,
-          content: stringifyContent(m.content ?? m.text),
-        }));
     }
 
     const relevantFacts = facts
@@ -179,5 +118,46 @@ export class RecallEngine {
     }
 
     return { ...req, messages };
+  }
+
+  private async retrieveLocal(query: string): Promise<ParsedFact[]> {
+    // engine.retrieve crosses the Rust/JS bridge asynchronously — must be awaited
+    const results = await this.engine.retrieve({
+      entity_id: this.config.entityId || '',
+      query_text: query,
+      dense_limit: 100, // candidate pool fetched from storage before re-ranking
+      limit: 10, // final number of facts returned to the caller
+    });
+    return results.map((r) => ({
+      content: r.content,
+      score: r.rank_score ?? r.similarity ?? 0,
+      dateCreated: r.date_created,
+      summaries: r.summaries?.map((s) => ({
+        content: s.content,
+        dateCreated: s.date_created,
+      })),
+    }));
+  }
+
+  private async retrieveCloud(query: string): Promise<{ facts: ParsedFact[]; history: Message[] }> {
+    const payload = {
+      attribution: {
+        entity: { id: this.config.entityId },
+        process: { id: this.config.processId },
+      },
+      query,
+      session: { id: this.session.id },
+    };
+    const response = await this.api.post<CloudRecallResponse>('cloud/recall', payload);
+    const facts = extractFacts(response);
+    const history = (
+      extractHistory(response) as Array<{ role: Role; content?: unknown; text?: string }>
+    )
+      .filter((m) => m.role !== 'system')
+      .map((m) => ({
+        role: m.role,
+        content: stringifyContent(m.content ?? m.text),
+      }));
+    return { facts, history };
   }
 }

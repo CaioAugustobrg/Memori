@@ -37,11 +37,10 @@ export class PostgresAdapter implements StorageAdapter {
     return 'postgresql';
   }
 
-  public async close(): Promise<void> {
-    if ('release' in this.client) {
+  public close(): void {
+    // If it's a PoolClient, release it back to the user's pool.
+    if ('release' in this.client && typeof this.client.release === 'function') {
       this.client.release();
-    } else {
-      await this.client.end();
     }
   }
 }

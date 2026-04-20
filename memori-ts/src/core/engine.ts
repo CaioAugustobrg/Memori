@@ -10,13 +10,13 @@ import { RetrievalRequest, RecallObject } from '../types/api.js';
 import { AugmentationInput } from '../types/integrations.js';
 
 export class NativeEngine {
-  private inner?: MemoriEngine;
+  private memoriEngine?: MemoriEngine;
   private _hasStorage: boolean = false;
 
   constructor(storageBridge?: StorageBridge, modelName?: string) {
     if (storageBridge) {
       this._hasStorage = true;
-      this.inner = new MemoriEngine(
+      this.memoriEngine = new MemoriEngine(
         modelName || null,
         (id: number, reqJson: string) => {
           this.handleBridgeCall<EmbeddingRow[]>(
@@ -27,14 +27,14 @@ export class NativeEngine {
               return storageBridge.fetchEmbeddings(req.entity_id, req.limit);
             },
             (res) =>
-              this.inner?.resolveEmbeddingsCallback(
+              this.memoriEngine?.resolveEmbeddingsCallback(
                 id,
                 res.map((r) => ({
                   id: r.id,
                   contentEmbedding: r.content_embedding ?? new Float32Array(0),
                 }))
               ),
-            () => this.inner?.resolveEmbeddingsCallback(id, [])
+            () => this.memoriEngine?.resolveEmbeddingsCallback(id, [])
           );
         },
         (id: number, reqJson: string) => {
@@ -46,7 +46,7 @@ export class NativeEngine {
               return storageBridge.fetchFactsByIds(req.ids);
             },
             (res) =>
-              this.inner?.resolveFactsCallback(
+              this.memoriEngine?.resolveFactsCallback(
                 id,
                 res.map((r) => ({
                   id: r.id,
@@ -58,7 +58,7 @@ export class NativeEngine {
                   })),
                 }))
               ),
-            () => this.inner?.resolveFactsCallback(id, [])
+            () => this.memoriEngine?.resolveFactsCallback(id, [])
           );
         },
         (id: number, reqJson: string) => {
@@ -69,18 +69,18 @@ export class NativeEngine {
               const req = JSON.parse(reqJson) as WriteBatch;
               return storageBridge.writeBatch(req);
             },
-            (res) => this.inner?.resolveWriteCallback(id, { writtenOps: res.written_ops }),
-            () => this.inner?.resolveWriteCallback(id, { writtenOps: 0 })
+            (res) => this.memoriEngine?.resolveWriteCallback(id, { writtenOps: res.written_ops }),
+            () => this.memoriEngine?.resolveWriteCallback(id, { writtenOps: 0 })
           );
         }
       );
     } else {
       // Fallback Engine without Storage
-      this.inner = new MemoriEngine(
+      this.memoriEngine = new MemoriEngine(
         modelName || null,
-        (id: number) => this.inner?.resolveEmbeddingsCallback(id, []),
-        (id: number) => this.inner?.resolveFactsCallback(id, []),
-        (id: number) => this.inner?.resolveWriteCallback(id, { writtenOps: 0 })
+        (id: number) => this.memoriEngine?.resolveEmbeddingsCallback(id, []),
+        (id: number) => this.memoriEngine?.resolveFactsCallback(id, []),
+        (id: number) => this.memoriEngine?.resolveWriteCallback(id, { writtenOps: 0 })
       );
     }
   }
@@ -118,9 +118,9 @@ export class NativeEngine {
   }
 
   public async retrieve(request: RetrievalRequest): Promise<RecallObject[]> {
-    if (!this.inner) throw new Error('Native engine not initialized.');
+    if (!this.memoriEngine) throw new Error('Native engine not initialized.');
 
-    const napiResults = await this.inner.retrieve({
+    const napiResults = await this.memoriEngine.retrieve({
       entityId: request.entity_id,
       queryText: request.query_text,
       denseLimit: request.dense_limit,
@@ -144,9 +144,9 @@ export class NativeEngine {
   }
 
   public async recall(request: RetrievalRequest): Promise<string> {
-    if (!this.inner) throw new Error('Native engine not initialized.');
+    if (!this.memoriEngine) throw new Error('Native engine not initialized.');
 
-    return await this.inner.recall({
+    return await this.memoriEngine.recall({
       entityId: request.entity_id,
       queryText: request.query_text,
       denseLimit: request.dense_limit,
@@ -155,9 +155,9 @@ export class NativeEngine {
   }
 
   public embedTexts(texts: string[]): Float32Array[] {
-    if (!this.inner || texts.length === 0) return [];
+    if (!this.memoriEngine || texts.length === 0) return [];
     try {
-      return this.inner.embedTexts(texts);
+      return this.memoriEngine.embedTexts(texts);
     } catch (e: unknown) {
       console.error('[Memori] Bridge Sync Error (embedTexts):', e);
       return [];
@@ -165,9 +165,9 @@ export class NativeEngine {
   }
 
   public submitAugmentation(input: AugmentationInput): string {
-    if (!this.inner) throw new Error('Native engine not initialized.');
+    if (!this.memoriEngine) throw new Error('Native engine not initialized.');
 
-    return this.inner.submitAugmentation({
+    return this.memoriEngine.submitAugmentation({
       entityId: input.entity_id,
       processId: input.process_id ?? undefined,
       conversationId: input.conversation_id ?? undefined,
@@ -189,7 +189,7 @@ export class NativeEngine {
   }
 
   public async waitForAugmentation(timeoutMs?: number): Promise<boolean> {
-    if (!this.inner) return false;
-    return await this.inner.waitForAugmentation(timeoutMs);
+    if (!this.memoriEngine) return false;
+    return await this.memoriEngine.waitForAugmentation(timeoutMs);
   }
 }

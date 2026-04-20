@@ -4,8 +4,14 @@ import { Config } from '../core/config.js';
 import { SessionManager } from '../core/session.js';
 import { extractLastUserMessage } from '../utils/utils.js';
 import { SDK_VERSION } from '../version.js';
-import { Trace } from '../types/integrations.js';
+import { AugmentationInput, Trace } from '../types/integrations.js';
 import { NativeEngine } from '../core/engine.js';
+
+type AugmentationData = {
+  sessionId: string;
+  messages: { role: string; content: string }[];
+  meta: Record<string, unknown>;
+};
 
 /**
  * Handles sending conversation turns to the augmentation pipeline after each LLM response.
@@ -51,20 +57,7 @@ export class AugmentationEngine {
     // Route to Rust engine for BYODB processing
     if (this.engine.hasStorage) {
       try {
-        this.engine.submitAugmentation({
-          entity_id: this.config.entityId || '',
-          process_id: this.config.processId,
-          conversation_id: data.sessionId,
-          conversation_messages: data.messages,
-          llm_provider: ctx.metadata.provider as string | undefined,
-          llm_model: req.model,
-          llm_provider_sdk_version: ctx.metadata.sdkVersion as string | undefined,
-          platform_provider: ctx.metadata.platform as string | undefined,
-          sdk_version: (ctx.metadata.integrationSdkVersion as string | undefined) ?? SDK_VERSION,
-          session_id: data.sessionId,
-          storage_dialect: this.config.storage ? this.config.storage.getDialect() : null,
-          storage_cockroachdb: this.config.storage?.getDialect() === 'cockroachdb',
-        });
+        this.engine.submitAugmentation(this.buildAugmentationInput(req, ctx, data));
       } catch (e: unknown) {
         if (this.config.testMode) console.warn('Local Augmentation failed:', e);
       }
@@ -98,20 +91,7 @@ export class AugmentationEngine {
     // Route to Rust engine for BYODB processing
     if (this.engine.hasStorage) {
       try {
-        this.engine.submitAugmentation({
-          entity_id: this.config.entityId || '',
-          process_id: this.config.processId,
-          conversation_id: data.sessionId,
-          conversation_messages: data.messages,
-          llm_provider: ctx.metadata.provider as string | undefined,
-          llm_model: req.model,
-          llm_provider_sdk_version: ctx.metadata.sdkVersion as string | undefined,
-          platform_provider: ctx.metadata.platform as string | undefined,
-          sdk_version: (ctx.metadata.integrationSdkVersion as string | undefined) ?? SDK_VERSION,
-          session_id: data.sessionId,
-          storage_dialect: this.config.storage ? this.config.storage.getDialect() : null,
-          storage_cockroachdb: this.config.storage?.getDialect() === 'cockroachdb',
-        });
+        this.engine.submitAugmentation(this.buildAugmentationInput(req, ctx, data));
       } catch (e: unknown) {
         if (this.config.testMode) console.warn('Local Agent Augmentation failed:', e);
       }
@@ -158,6 +138,27 @@ export class AugmentationEngine {
         cockroachdb: false,
         dialect: this.config.storage ? this.config.storage.getDialect() : null,
       },
+    };
+  }
+
+  private buildAugmentationInput(
+    req: LLMRequest,
+    ctx: CallContext,
+    data: AugmentationData
+  ): AugmentationInput {
+    return {
+      entity_id: this.config.entityId || '',
+      process_id: this.config.processId,
+      conversation_id: data.sessionId,
+      conversation_messages: data.messages,
+      llm_provider: ctx.metadata.provider as string | undefined,
+      llm_model: req.model,
+      llm_provider_sdk_version: ctx.metadata.sdkVersion as string | undefined,
+      platform_provider: ctx.metadata.platform as string | undefined,
+      sdk_version: (ctx.metadata.integrationSdkVersion as string | undefined) ?? SDK_VERSION,
+      session_id: data.sessionId,
+      storage_dialect: this.config.storage ? this.config.storage.getDialect() : null,
+      storage_cockroachdb: this.config.storage?.getDialect() === 'cockroachdb',
     };
   }
 }
