@@ -4,6 +4,12 @@ type MatcherFn = (conn: unknown) => boolean;
 type AdapterConstructor = new (conn: unknown) => StorageAdapter;
 type DriverConstructor = new (conn: StorageAdapter) => BaseDriver;
 
+/**
+ * Auto-discovery registry for storage adapters and dialect drivers.
+ *
+ * Adapters and drivers register themselves via side-effect imports in `StorageManager`.
+ * `getAdapter` inspects the raw connection at runtime to find the right adapter class.
+ */
 export class Registry {
   private static adapters = new Map<MatcherFn, AdapterConstructor>();
   private static drivers = new Map<string, DriverConstructor>();
@@ -23,6 +29,8 @@ export class Registry {
   }
 
   public static getAdapter(rawConn: unknown): StorageAdapter {
+    // Some ORMs (e.g. Drizzle) export a factory function rather than a connection instance —
+    // call it once to unwrap the actual connection before running matcher checks.
     const connToCheck = typeof rawConn === 'function' ? (rawConn as () => unknown)() : rawConn;
 
     for (const [matcher, AdapterClass] of this.adapters.entries()) {

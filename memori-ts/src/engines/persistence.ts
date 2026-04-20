@@ -5,6 +5,12 @@ import { SessionManager } from '../core/session.js';
 import { NativeEngine } from '../core/engine.js';
 import { extractLastUserMessage } from '../utils/utils.js';
 
+/**
+ * Saves conversation messages to the Memori Cloud after each LLM response.
+ *
+ * Skipped entirely when a local storage connection is present — in BYODB mode
+ * the Rust augmentation pipeline writes conversation history directly to the database.
+ */
 export class PersistenceEngine {
   constructor(
     private readonly api: Api,

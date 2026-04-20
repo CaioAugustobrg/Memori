@@ -12,6 +12,13 @@ import {
 } from '../utils/utils.js';
 import { CloudRecallResponse, ParsedFact } from '../types/api.js';
 
+/**
+ * Retrieves relevant memories and injects them into the LLM system prompt before each call.
+ *
+ * Operates in two modes: local (BYODB — vector search via the Rust engine) or cloud
+ * (API call to Memori's recall endpoint). Also re-hydrates conversation history when
+ * available from the cloud.
+ */
 export class RecallEngine {
   constructor(
     private readonly api: Api,
@@ -28,12 +35,12 @@ export class RecallEngine {
     if (this.engine.hasStorage) {
       if (!this.config.entityId) return [];
       try {
-        // CRITICAL: Added 'await' because retrieve is now an async Promise
+        // engine.retrieve crosses the Rust/JS bridge asynchronously — must be awaited
         const results = await this.engine.retrieve({
           entity_id: this.config.entityId,
           query_text: query,
-          dense_limit: 100,
-          limit: 10,
+          dense_limit: 100, // candidate pool fetched from storage before re-ranking
+          limit: 10, // final number of facts returned to the caller
         });
 
         return results.map((r) => ({
@@ -85,12 +92,12 @@ export class RecallEngine {
     if (this.engine.hasStorage) {
       if (!this.config.entityId) return req;
       try {
-        // CRITICAL: Added 'await' here to prevent thread deadlock
+        // engine.retrieve crosses the Rust/JS bridge asynchronously — must be awaited
         const rawFacts = await this.engine.retrieve({
           entity_id: this.config.entityId,
           query_text: userQuery,
-          dense_limit: 100,
-          limit: 10,
+          dense_limit: 100, // candidate pool fetched from storage before re-ranking
+          limit: 10, // final number of facts injected into the prompt
         });
 
         facts = rawFacts.map((r) => ({

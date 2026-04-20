@@ -1,4 +1,4 @@
-import { MemoriEngine } from '/Users/rpkruse/src/memori/python-sdk/rust-core/bindings/node/index.js';
+import { MemoriEngine } from '../native/index.js';
 import {
   StorageBridge,
   WriteBatch,

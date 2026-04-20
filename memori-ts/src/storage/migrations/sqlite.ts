@@ -84,7 +84,6 @@ export const sqliteMigrations: Record<number, Migration[]> = {
     },
     {
       description: 'create table memori_entity_fact',
-      // Notice we changed `operation` to `operations` (an array) here!
       operations: [
         `
         CREATE TABLE IF NOT EXISTS memori_entity_fact(
@@ -203,7 +202,6 @@ export const sqliteMigrations: Record<number, Migration[]> = {
   2: [
     {
       description: 'create table memori_entity_fact_mention',
-      // We also changed `operation` to `operations` here!
       operations: [
         `
         CREATE TABLE IF NOT EXISTS memori_entity_fact_mention(

@@ -27,11 +27,19 @@ pub mod storage;
 pub use error::OrchestratorError;
 pub use runtime::{FlushError, RuntimeConfig, RuntimeError, SubmitError, WorkerRuntime};
 
+/// Returned immediately when a postprocess job is enqueued successfully.
+///
+/// The `job_id` can be used for logging/tracing; there is currently no API to
+/// query job status by ID — use [`EngineOrchestrator::wait_for_augmentation`] to
+/// drain the queue instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PostprocessAccepted {
     pub job_id: u64,
 }
 
+/// Returned immediately when an augmentation job is enqueued successfully.
+///
+/// Like [`PostprocessAccepted`], the `job_id` is for observability only.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AugmentationAccepted {
     pub job_id: u64,
@@ -41,6 +49,9 @@ pub struct AugmentationAccepted {
 ///
 /// We hold the `SentenceTransformersEmbedder` inside an `Arc` so its massive ML model
 /// is natively tied to the lifecycle of the engine and cleanly dropped when the engine is destroyed.
+///
+/// The two runtimes are intentionally separate pools: postprocessing is CPU-adjacent and
+/// low-latency, while augmentation hits the network and benefits from its own bounded queue.
 #[derive(Clone)]
 pub struct EngineOrchestrator {
     embedder: Arc<SentenceTransformersEmbedder>,
@@ -49,6 +60,8 @@ pub struct EngineOrchestrator {
     storage_bridge: Option<Arc<dyn StorageBridge>>,
 }
 
+// Relaxed ordering is sufficient: job IDs only need to be unique and monotonically
+// increasing, not synchronized with any other memory operation.
 static NEXT_JOB_ID: AtomicU64 = AtomicU64::new(1);
 
 impl EngineOrchestrator {
@@ -60,6 +73,8 @@ impl EngineOrchestrator {
         Self::new_with_storage(model_name, None)
     }
 
+    /// Like [`Self::new`] but wires a [`StorageBridge`] into the augmentation runtime so
+    /// processed facts are persisted back to the host environment (e.g. a JS/SQLite layer).
     pub fn new_with_storage(
         model_name: Option<&str>,
         storage_bridge: Option<Arc<dyn StorageBridge>>,
@@ -87,14 +102,20 @@ impl EngineOrchestrator {
         embed_texts(&self.embedder, texts)
     }
 
+    /// Dispatches a diagnostic command string. Currently only `"ping"` is supported.
     pub fn execute(&self, command: &str) -> Result<String, OrchestratorError> {
         execute_command(command)
     }
 
+    /// Health-check convenience method; used by bindings to verify the native module loaded.
     pub fn hello_world(&self) -> String {
         "hello world".to_string()
     }
 
+    /// Enqueues a raw JSON payload for postprocessing. Returns immediately with a job handle.
+    ///
+    /// # Errors
+    /// Returns [`OrchestratorError::QueueFull`] if the runtime's bounded channel is at capacity.
     pub fn postprocess_request(
         &self,
         payload: &str,
@@ -110,6 +131,10 @@ impl EngineOrchestrator {
         Ok(PostprocessAccepted { job_id })
     }
 
+    /// Embeds `request.query_text` and runs a dense vector search against the storage bridge.
+    ///
+    /// Returns an empty vec (not an error) when limits are zero or no candidates exist —
+    /// callers can treat this as a valid "nothing found" response.
     pub fn retrieve(
         &self,
         request: RetrievalRequest,
@@ -133,10 +158,13 @@ impl EngineOrchestrator {
             .as_deref()
             .ok_or(OrchestratorError::StorageUnavailable)?;
         let (flat_query, shape) = self.embed(vec![request.query_text.clone()]);
+        // shape is [num_texts, embedding_dim]; either being 0 means the model produced nothing
         if shape[0] == 0 || shape[1] == 0 {
             return Ok(Vec::new());
         }
         let query_embedding = &flat_query[..shape[1]];
+        // An all-zero vector means the embedder fell back to its degraded path — don't
+        // run retrieval with it as it would return semantically meaningless results.
         if query_embedding.iter().all(|value| *value == 0.0) {
             return Err(OrchestratorError::ModelError(
                 "failed to generate a valid query embedding".to_string(),
@@ -145,11 +173,18 @@ impl EngineOrchestrator {
         retrieval::run_retrieval(bridge, &request, query_embedding)
     }
 
+    /// Convenience wrapper around [`Self::retrieve`] that formats results as a
+    /// human-readable string suitable for injection into an LLM context window.
     pub fn recall(&self, request: RetrievalRequest) -> Result<String, OrchestratorError> {
         let ranked = self.retrieve(request)?;
         Ok(retrieval::format_recall_output(&ranked))
     }
 
+    /// Enqueues an augmentation job. The worker will call the LLM, parse facts from
+    /// the response, and persist them via the storage bridge asynchronously.
+    ///
+    /// # Errors
+    /// Returns [`OrchestratorError::QueueFull`] if the runtime's bounded channel is at capacity.
     pub fn submit_augmentation(
         &self,
         input: AugmentationInput,
@@ -162,6 +197,10 @@ impl EngineOrchestrator {
         Ok(AugmentationAccepted { job_id })
     }
 
+    /// Blocks until all queued augmentation jobs complete or the optional timeout elapses.
+    ///
+    /// Returns `true` if the queue drained cleanly, `false` if the timeout was reached
+    /// before all jobs finished. Useful in tests and graceful-shutdown paths.
     pub fn wait_for_augmentation(
         &self,
         timeout: Option<Duration>,
@@ -191,9 +230,9 @@ impl Drop for EngineOrchestrator {
 fn init_postprocess_runtime() -> Result<WorkerRuntime<PostprocessJob>, OrchestratorError> {
     let postprocess_runtime = WorkerRuntime::new(
         RuntimeConfig {
-            queue_capacity: 512,
+            queue_capacity: 512, // back-pressure limit; submits beyond this return QueueFull
             max_concurrency: 2,
-            worker_threads: Some(1),
+            worker_threads: Some(1), // single dedicated OS thread keeps postprocess off the main runtime
             ..Default::default()
         },
         |job: PostprocessJob| async move {
@@ -201,6 +240,7 @@ fn init_postprocess_runtime() -> Result<WorkerRuntime<PostprocessJob>, Orchestra
                 "[orchestrator postprocess worker] job {} accepted",
                 job.job_id
             );
+            // TODO: replace with real postprocessing logic
             tokio::time::sleep(Duration::from_millis(35)).await;
             log::info!(
                 "[orchestrator postprocess worker] job {} processed payload ({} bytes)",
@@ -224,7 +264,7 @@ fn init_augmentation_runtime(
     let augmentation_runtime = WorkerRuntime::new(
         RuntimeConfig {
             queue_capacity: 512,
-            max_concurrency: 2,
+            max_concurrency: 2,  // bound concurrent LLM requests to avoid overwhelming the API
             worker_threads: Some(1),
             ..Default::default()
         },
@@ -327,11 +367,7 @@ fn validate_augmentation_input(input: &AugmentationInput) -> Result<(), Orchestr
         .conversation_messages
         .iter()
         .any(|m| !m.content.trim().is_empty() && !m.role.trim().is_empty());
-    let has_content = input
-        .content
-        .as_ref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
+    let has_content = input.content.as_deref().is_some_and(|s| !s.trim().is_empty());
     if !has_message && !has_content {
         return Err(OrchestratorError::InvalidInput(
             "augmentation requires conversation_messages or content".to_string(),

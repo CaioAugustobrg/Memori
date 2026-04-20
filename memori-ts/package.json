@@ -25,9 +25,9 @@
     "LICENSE"
   ],
   "scripts": {
-    "prebuild": "rm -rf dist",
+    "prebuild": "node scripts/sync-native.js",
     "build": "tsc -p tsconfig.build.json",
-    "build:dev": "tsc -p tsconfig.json",
+    "build:dev": "npm run prebuild && tsc -p tsconfig.json",
     "memori": "node dist/bin/cli.js",
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",

@@ -5,6 +5,9 @@ import { Registry } from '../registry.js';
 import { CandidateFactRow, SemanticTriplePayload } from '../../types/storage.js';
 import { bufferToFloat32Array } from '../../utils/utils.js';
 
+// Generates a stable content-addressable key used to deduplicate facts, subjects, and predicates.
+// SHA-256 is chosen for its collision resistance — two identical strings always produce the same
+// `uniq`, so ON CONFLICT clauses can increment `num_times` instead of inserting a duplicate.
 function generateUniq(inputs: string[]): string {
   const hash = createHash('sha256');
   for (const input of inputs) {
@@ -13,6 +16,8 @@ function generateUniq(inputs: string[]): string {
   return hash.digest('hex');
 }
 
+// Reinterprets the Float32Array's underlying ArrayBuffer as a raw byte Buffer for BLOB storage.
+// No copy is made — the Buffer shares memory with the Float32Array.
 function formatEmbeddingForDb(embedding: Float32Array): Buffer {
   return Buffer.from(embedding.buffer, embedding.byteOffset, embedding.byteLength);
 }
@@ -52,6 +57,11 @@ class Conversation {
     public readonly messages: ConversationMessages
   ) {}
 
+  /**
+   * Returns the existing conversation for this session if it's still active (last message
+   * within `timeoutMinutes`), otherwise creates a new one. This keeps all messages from
+   * a single chat window in one conversation row without splitting on natural pauses.
+   */
   public async create(
     sessionId: number | string,
     timeoutMinutes: number
@@ -126,6 +136,8 @@ class EntityFact {
       const embedding =
         factEmbeddings && i < factEmbeddings.length ? factEmbeddings[i] : new Float32Array(0);
 
+      // Skip facts without a valid embedding — they can't be used for vector search
+      // and will be inserted via createWithoutEmbedding if needed later.
       if (embedding.length === 0) continue;
 
       const embeddingFormatted = formatEmbeddingForDb(embedding);
@@ -170,6 +182,8 @@ class EntityFact {
       id: number | string;
       content_embedding: Buffer | null;
     }>(
+      // Ordering by recency and frequency surfaces the most relevant candidate embeddings first,
+      // so if the limit is hit we discard the oldest/rarest facts rather than recent ones.
       `SELECT id, content_embedding FROM memori_entity_fact WHERE entity_id = ? ORDER BY date_last_time DESC, num_times DESC, id DESC LIMIT ?`,
       [entityId, limit]
     );
@@ -189,6 +203,8 @@ class EntityFact {
   public async getFactsByIds(factIds: (string | number)[]): Promise<CandidateFactRow[]> {
     if (factIds.length === 0) return [];
     const placeholders = factIds.map(() => '?').join(',');
+    // Two-query approach: first fetch the facts, then their summaries separately.
+    // A JOIN would duplicate fact rows for facts with multiple summaries, complicating mapping.
     const factRows = await this.conn.execute<{
       id: number | string;
       content: string;
@@ -370,6 +386,8 @@ class Schema {
 }
 
 export class SqliteDriver extends BaseDriver {
+  // SQLite's synchronous API doesn't leave open transactions on error,
+  // so we don't need to issue a ROLLBACK before retrying schema reads.
   public readonly requiresRollbackOnError = false;
   public readonly migrations = sqliteMigrations;
 

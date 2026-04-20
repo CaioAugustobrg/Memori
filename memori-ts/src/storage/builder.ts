@@ -1,6 +1,13 @@
 import { Config } from '../core/config.js';
 import { StorageAdapter, BaseDriver } from './base.js';
 
+/**
+ * Runs pending database migrations to bring the schema up to the latest version.
+ *
+ * Reads the current schema version from `memori_schema_version`, then applies
+ * each missing migration batch in order. Each batch runs in its own transaction
+ * so a partial failure only rolls back that batch, not the entire migration history.
+ */
 export class Builder {
   private displayBanner = true;
 
@@ -10,6 +17,7 @@ export class Builder {
     private readonly driver: BaseDriver
   ) {}
 
+  /** Suppresses console output — useful in tests and CI environments. */
   public disableBanner(): this {
     this.displayBanner = false;
     return this;
@@ -47,7 +55,9 @@ export class Builder {
       return;
     }
 
-    // 2. Run pending migrations sequentially
+    // 2. Run pending migrations sequentially.
+    // Using for(;;) instead of a counted loop because we don't know the max version upfront —
+    // we increment until there's no migration registered for the next number.
     let num = currentVersion;
     for (;;) {
       num += 1;
@@ -61,7 +71,6 @@ export class Builder {
 
         const ops = migration.operations || (migration.operation ? [migration.operation] : []);
 
-        // FIX: Start a transaction before running the migration statements!
         await this.adapter.begin();
         for (const operation of ops) {
           await this.adapter.execute(operation);
@@ -70,7 +79,8 @@ export class Builder {
       }
     }
 
-    // 3. Update the schema version tracking table
+    // 3. Update the schema version tracking table.
+    // `num` was incremented one past the last applied migration before breaking, so subtract 1.
     await this.adapter.begin();
     await this.driver.schema.version.delete();
     await this.driver.schema.version.create(num - 1);

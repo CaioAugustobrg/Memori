@@ -23,8 +23,8 @@ export interface StorageAdapter {
 
 export interface Migration {
   description: string;
-  operation?: string;
-  operations?: string[];
+  operation?: string; // single SQL statement
+  operations?: string[]; // multiple statements run in sequence (e.g. CREATE TABLE + CREATE INDEX)
 }
 
 interface SchemaVersionOps {
@@ -100,11 +100,14 @@ interface SessionOps {
 }
 
 export abstract class BaseDriver {
+  /** When true, the Builder will issue a ROLLBACK if reading the schema version fails. Needed for PostgreSQL/MySQL but not SQLite. */
   public abstract readonly requiresRollbackOnError: boolean;
   public abstract readonly migrations: Partial<Record<number, Migration[]>>;
 
   constructor(protected readonly conn: StorageAdapter) {}
 
+  // The `!` (definite assignment) on each property is safe because all concrete
+  // subclasses initialize them in their constructor before any method is called.
   public conversation!: ConversationOps;
   public conversationMessage!: ConversationMessageOps;
   public conversationMessages!: ConversationMessagesOps;

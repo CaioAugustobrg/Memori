@@ -12,6 +12,7 @@ export function formatDate(dateStr?: string): string | undefined {
   if (!dateStr) return undefined;
   try {
     const d = new Date(dateStr);
+    // If the string isn't a valid date, truncate it to 16 chars (YYYY-MM-DD HH:mm) as a best-effort
     if (isNaN(d.getTime())) return dateStr.substring(0, 16);
     return d.toISOString().replace('T', ' ').substring(0, 16);
   } catch {
@@ -19,6 +20,7 @@ export function formatDate(dateStr?: string): string | undefined {
   }
 }
 
+/** @internal Deduplicates summaries across facts using content+date as the key. */
 function collectSummariesFromFacts(facts: ParsedFact[]): ParsedSummary[] {
   const summaries: ParsedSummary[] = [];
   const seen = new Set<string>();
@@ -45,6 +47,7 @@ export function formatSummariesFromFacts(facts: ParsedFact[]): string[] {
   );
 }
 
+/** @internal Groups cloud-returned summaries by fact ID and merges them into the fact objects. */
 function attachRawSummariesToFacts(facts: RecallItem[], summaries: RecallSummary[]): RecallItem[] {
   if (summaries.length === 0) return facts;
 
@@ -72,6 +75,7 @@ function attachRawSummariesToFacts(facts: RecallItem[], summaries: RecallSummary
   });
 }
 
+/** @internal Converts a raw API summary to the public `ParsedSummary` shape, filtering out entries with unparseable dates. */
 function normalizeSummary(summary: RecallSummary): ParsedSummary | undefined {
   const dateCreated = formatDate(summary.date_created);
   if (!dateCreated) return undefined;
